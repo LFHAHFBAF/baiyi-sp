@@ -34,7 +34,7 @@ local content = Instance.new("TextLabel")
 content.Size = UDim2.new(1, -20, 0, 80)
 content.Position = UDim2.new(0, 10, 0, 30)
 content.BackgroundTransparency = 1
-content.Text = "由于此音频为STBB官方私人音频，请在STBB里运行此脚本，否则无效"
+content.Text = "由于音频为STBB官方私人音频，请在STBB里运行此脚本，否则无法正常播放"
 content.Font = Enum.Font.SourceSans
 content.TextSize = 16
 content.TextColor3 = Color3.new(1, 1, 1)
@@ -147,3 +147,4 @@ cancelBtn.MouseButton1Click:Connect(function()
     sound:Stop()
     screenGui:Destroy()
 end)
+
