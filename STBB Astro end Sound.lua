@@ -3,6 +3,13 @@ local StarterGui = game:GetService("StarterGui")
 local player = Players.LocalPlayer
 local PlayerGui = player:WaitForChild("PlayerGui")
 
+StarterGui:SetCore("SendNotification", {
+    Title = "",
+    Text = "脚本By:白羽，倒卖私夫木",
+    Duration = 5,
+    Icon = ""
+})
+
 local sound = Instance.new("Sound")
 sound.SoundId = "rbxassetid://105458046205538"
 sound.Volume = 3
@@ -34,7 +41,7 @@ local content = Instance.new("TextLabel")
 content.Size = UDim2.new(1, -20, 0, 80)
 content.Position = UDim2.new(0, 10, 0, 30)
 content.BackgroundTransparency = 1
-content.Text = "由于音频为STBB官方私人音频，请在STBB里运行此脚本，否则无法正常播放"
+content.Text = "由于此音频为STBB官方私人音频，请在STBB里运行此脚本，否则无效"
 content.Font = Enum.Font.SourceSans
 content.TextSize = 16
 content.TextColor3 = Color3.new(1, 1, 1)
@@ -137,7 +144,7 @@ loopPlayBtn.MouseButton1Click:Connect(function()
     
     StarterGui:SetCore("SendNotification", {
         Title = "循环播放", 
-        Text = "循环播放开启\n重进来取消",
+        Text = "循环播放开启\n需重进游戏关闭音乐",
         Duration = 8,
         Icon = "rbxassetid://0"
     })
@@ -147,4 +154,3 @@ cancelBtn.MouseButton1Click:Connect(function()
     sound:Stop()
     screenGui:Destroy()
 end)
-
