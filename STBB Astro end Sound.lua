@@ -5,7 +5,7 @@ local PlayerGui = player:WaitForChild("PlayerGui")
 
 StarterGui:SetCore("SendNotification", {
     Title = "",
-    Text = "脚本By:白羽，倒卖私夫木",
+    Text = "脚本By:白羽",
     Duration = 5,
     Icon = ""
 })
@@ -154,4 +154,5 @@ cancelBtn.MouseButton1Click:Connect(function()
     sound:Stop()
     screenGui:Destroy()
 end)
+
 
