@@ -1,6 +1,6 @@
 -- 脚本类型：LocalScript
--- 放置位置：StarterPlayer > StarterPlayerScripts 或 StarterGui
--- 功能：电脑端Z键长按/松开 + 手机端右上角按钮点击切换治疗状态
+-- 放置位置：StarterPlayer > StarterPlayerScripts
+-- 核心：电脑=鼠标选目标 / 手机=自动选最近 + 手机按钮调小上移
 
 -- 1. 引入核心服务
 local Players = game:GetService("Players")
@@ -8,177 +8,271 @@ local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local GuiService = game:GetService("GuiService")
+local Workspace = game:GetService("Workspace")
 
 -- 2. 初始化核心变量
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local mouse = LocalPlayer:GetMouse() -- 电脑端鼠标对象（核心）
+
 local Character = nil
+local HumanoidRootPart = nil
 local CooldownFolder = nil
 local Humanoid = nil
 
 -- 核心状态变量
-local isHealing = false       -- 是否正在治疗（对应长按Z键状态）
-local hasSentHealRequest = false -- 是否已发送治疗请求（避免重复发送）
+local isHealing = false       
+local hasSentHealRequest = false
 
--- 3. 等待角色加载（含复活重连）
+-- 3. 角色加载（确保核心部件就绪）
 local function waitForCharacter()
     Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    HumanoidRootPart = Character:WaitForChild("HumanoidRootPart", 10)
     CooldownFolder = Character:WaitForChild("CooldownFolder", 10)
     Humanoid = Character:WaitForChild("Humanoid", 10)
 
-    -- 角色复活后重置状态和实例
+    -- 角色复活重置
     LocalPlayer.CharacterAdded:Connect(function(newChar)
         Character = newChar
-        CooldownFolder = newChar:WaitForChild("CooldownFolder", 10)
-        Humanoid = newChar:WaitForChild("Humanoid", 10)
+        HumanoidRootPart = newChar:WaitForChild("HumanoidRootPart", 5)
+        CooldownFolder = newChar:WaitForChild("CooldownFolder", 5)
+        Humanoid = newChar:WaitForChild("Humanoid", 5)
         isHealing = false
         hasSentHealRequest = false
-        -- 同步手机按钮文本
         if healButton then
-            healButton.Text = "治疗友方"
+            healButton.Text = "治疗"
+            healButton.BackgroundColor3 = Color3.fromRGB(76, 175, 80)
         end
     end)
 end
 waitForCharacter()
 
--- 4. 核心治疗逻辑（保留原函数所有校验）
+-- 4. 【电脑端】鼠标选目标：射线检测鼠标指向的玩家
+local function getTargetFromMouse()
+    -- 安全校验：鼠标/自身角色未就绪
+    if not mouse or not Character or not HumanoidRootPart then
+        warn("[电脑端] 鼠标/角色未加载，无法选目标")
+        return nil
+    end
+
+    -- 发射射线（从相机到鼠标指向位置）
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = {Character} -- 排除自己
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.IgnoreWater = true
+
+    local camera = Workspace.CurrentCamera
+    local rayOrigin = camera.CFrame.Position
+    local rayDirection = (mouse.Hit.Position - rayOrigin).Unit * 1000 -- 射线长度1000 studs
+
+    local rayResult = Workspace:Raycast(rayOrigin, rayDirection, rayParams)
+    if not rayResult then return nil end
+
+    -- 从射线击中的部件找所属玩家
+    local hitPart = rayResult.Instance
+    local targetChar = hitPart:FindFirstAncestorOfClass("Model")
+    if not targetChar then return nil end
+
+    local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
+    -- 验证目标玩家：存在、存活、不是自己
+    if targetPlayer and targetPlayer ~= LocalPlayer then
+        local targetHumanoid = targetChar:FindFirstChild("Humanoid")
+        if targetHumanoid and targetHumanoid.Health > 0 then
+            return targetPlayer
+        end
+    end
+
+    return nil -- 未找到有效目标
+end
+
+-- 5. 【手机端】自动选最近的玩家
+local function findNearestPlayer()
+    if not Character or not HumanoidRootPart then
+        warn("[手机端] 角色/根部件未加载，无法选最近玩家")
+        return nil
+    end
+
+    local nearestPlayer = nil
+    local shortestDistance = math.huge
+    local myPosition = HumanoidRootPart.Position
+
+    -- 遍历所有玩家找最近存活的
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local targetChar = player.Character
+            if targetChar and targetChar:FindFirstChild("HumanoidRootPart") then
+                local targetHumanoid = targetChar:FindFirstChild("Humanoid")
+                if targetHumanoid and targetHumanoid.Health > 0 then
+                    local distance = (myPosition - targetChar.HumanoidRootPart.Position).Magnitude
+                    if distance < shortestDistance then
+                        shortestDistance = distance
+                        nearestPlayer = player
+                    end
+                end
+            end
+        end
+    end
+
+    return nearestPlayer
+end
+
+-- 6. 核心治疗逻辑（分设备选目标）
 local function startHealFriend()
-    -- 安全校验
+    -- 基础校验（通用）
     if not Character or not CooldownFolder or not Humanoid then
-        warn("治疗失败：角色核心实例未加载")
+        warn("[治疗失败] 角色核心实例未加载")
         return
     end
-    if isHealing then return end -- 已在治疗中，不重复执行
+    if isHealing then 
+        print("[治疗提示] 已在治疗中，无需重复触发")
+        return 
+    end
 
-    -- 原逻辑1：冷却检查
+    -- 通用校验：冷却/攻击/存活
     if CooldownFolder:FindFirstChild("FriendHeal_Cooldown") and CooldownFolder.FriendHeal_Cooldown.Value == true then
-        warn("治疗失败：技能冷却中")
+        warn("[治疗失败] 技能冷却中")
         return
     end
-
-    -- 原逻辑2：攻击状态检查
     if CooldownFolder:FindFirstChild("ActiveM1") and CooldownFolder.ActiveM1.Value == true then
-        warn("治疗失败：正在普通攻击")
+        warn("[治疗失败] 正在普通攻击")
         return
     end
-
-    -- 原逻辑3：自身存活检查
     if Humanoid.Health <= 0 then
-        warn("治疗失败：自身已死亡")
+        warn("[治疗失败] 自身已死亡")
         return
     end
 
-    -- 发送开始治疗请求
+    -- 分设备获取目标
+    local targetPlayer = nil
+    if UserInputService.TouchEnabled then
+        -- 手机端：自动选最近
+        targetPlayer = findNearestPlayer()
+        if not targetPlayer then
+            warn("[手机端] 未找到可治疗的最近玩家（无其他存活玩家）")
+            return
+        end
+    else
+        -- 电脑端：鼠标选目标
+        targetPlayer = getTargetFromMouse()
+        if not targetPlayer then
+            warn("[电脑端] 鼠标未指向有效玩家，请瞄准其他存活玩家")
+            return
+        end
+    end
+
+    -- 发送治疗请求（带目标玩家）
     local healRemote = ReplicatedStorage:FindFirstChild("HealFriendTitanClockMan")
     if healRemote then
-        healRemote:FireServer("start")
+        healRemote:FireServer("start", targetPlayer)
         hasSentHealRequest = true
         isHealing = true
-        print("开始治疗友方")
+        -- 不同设备的提示
+        if UserInputService.TouchEnabled then
+            print(string.format("[手机端] 开始治疗最近玩家：%s", targetPlayer.Name))
+        else
+            print(string.format("[电脑端] 开始治疗鼠标指向的玩家：%s", targetPlayer.Name))
+        end
     else
-        warn("治疗失败：远程事件 HealFriendTitanClockMan 不存在")
+        warn("[治疗失败] 远程事件 HealFriendTitanClockMan 不存在")
     end
 end
 
--- 5. 停止治疗逻辑
+-- 7. 停止治疗逻辑（通用）
 local function stopHealFriend()
-    if not isHealing then return end -- 未在治疗中，不执行
+    if not isHealing then 
+        print("[治疗提示] 未在治疗中，无需停止")
+        return 
+    end
 
-    -- 发送停止治疗请求
     if hasSentHealRequest then
         local healRemote = ReplicatedStorage:FindFirstChild("HealFriendTitanClockMan")
         if healRemote then
             healRemote:FireServer("stop")
-            print("停止治疗友方")
+            print("[治疗成功] 停止治疗")
         end
         hasSentHealRequest = false
     end
     isHealing = false
 end
 
--- 6. 电脑端Z键长按/松开逻辑（保留）
--- 6.1 按下Z键：开始治疗
+-- 8. 电脑端：Z键长按+鼠标选目标触发
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
+    if gameProcessed or UserInputService.TouchEnabled then return end -- 手机端不触发此逻辑
+    -- 按下Z键触发治疗（鼠标已选目标）
     if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.Z then
         startHealFriend()
     end
 end)
-
--- 6.2 松开Z键：停止治疗
 UserInputService.InputEnded:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
+    if gameProcessed or UserInputService.TouchEnabled then return end
+    -- 松开Z键停止治疗
     if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.Z then
         stopHealFriend()
     end
 end)
 
--- 7. 手机端UI适配：右上角治疗按钮（核心新增）
-local healButton = nil -- 按钮实例
+-- 9. 手机端UI：50x50 + 顶部5像素 + 点击切换
+local healButton = nil
 local function createMobileHealButton()
-    -- 创建屏幕GUI容器
     local screenGui = Instance.new("ScreenGui")
     screenGui.Name = "HealFriendMobileUI"
     screenGui.Parent = PlayerGui
-    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    screenGui.IgnoreGuiInset = false -- 适配手机刘海屏
+    screenGui.DisplayOrder = 999 -- 防遮挡
+    screenGui.IgnoreGuiInset = false
 
-    -- 创建按钮（大小80x80，足够大不遮挡，右上角留出边距）
+    -- 按钮：50x50像素 + 右上角顶部5像素
     local button = Instance.new("TextButton")
     button.Name = "HealFriendButton"
     button.Parent = screenGui
-    -- 位置：右上角（X: 屏幕右-90像素，Y: 顶部20像素）
-    button.Position = UDim2.new(1, -90, 0, 20)
-    -- 大小：80x80像素（手机上清晰可见，易点击）
-    button.Size = UDim2.new(0, 80, 0, 80)
-    -- 样式美化（避免太简陋，易识别）
-    button.BackgroundColor3 = Color3.fromRGB(76, 175, 80) -- 绿色（治疗标识）
+    button.Position = UDim2.new(1, -60, 0, 5) -- 上移到顶部5像素
+    button.Size = UDim2.new(0, 50, 0, 50)     -- 调小到50x50
+    -- 交互保障
+    button.Active = true
+    button.Selectable = true
+    button.ZIndex = 100
+    -- 样式
+    button.BackgroundColor3 = Color3.fromRGB(76, 175, 80)
     button.BackgroundTransparency = 0.1
     button.BorderColor3 = Color3.fromRGB(255, 255, 255)
     button.BorderSizePixel = 2
-    button.CornerRadius = UDim.new(0, 10) -- 圆角，更美观
-    -- 文本设置
-    button.Text = "治疗友方"
+    button.CornerRadius = UDim.new(0, 8)
+    button.Text = "治疗"
     button.TextColor3 = Color3.fromRGB(255, 255, 255)
-    button.TextScaled = true -- 文本自适应按钮大小
-    button.TextSize = 14
+    button.TextScaled = true
     button.Font = Enum.Font.SourceSansBold
 
-    -- 按钮点击逻辑：切换治疗状态（点一下开始，再点一下停止）
-    button.MouseButton1Click:Connect(function()
+    -- 手机点击切换治疗状态
+    local function onButtonClick()
         if not isHealing then
-            -- 第一次点击：开始治疗
-            startHealFriend()
-            button.Text = "停止治疗"
-            button.BackgroundColor3 = Color3.fromRGB(244, 67, 54) -- 红色（停止标识）
+            startHealFriend() -- 自动选最近玩家
+            button.Text = "停止"
+            button.BackgroundColor3 = Color3.fromRGB(244, 67, 54)
         else
-            -- 第二次点击：停止治疗
             stopHealFriend()
-            button.Text = "治疗友方"
-            button.BackgroundColor3 = Color3.fromRGB(76, 175, 80) -- 恢复绿色
+            button.Text = "治疗"
+            button.BackgroundColor3 = Color3.fromRGB(76, 175, 80)
         end
-    end)
+    end
+    button.TouchTap:Connect(onButtonClick) -- 手机原生触摸
+    button.MouseButton1Click:Connect(onButtonClick) -- 兼容
 
-    -- 适配手机横屏/竖屏切换（可选，增强适配性）
+    -- 适配刘海屏
     RunService.RenderStepped:Connect(function()
-        -- 防止按钮被手机虚拟按键遮挡
         local safeArea = GuiService:GetSafeAreaInsets()
-        button.Position = UDim2.new(1, -90 - safeArea.Right, 0, 20 + safeArea.Top)
+        button.Position = UDim2.new(1, -60 - safeArea.Right, 0, 5 + safeArea.Top)
     end)
 
     healButton = button
+    print("[手机端] 治疗按钮已创建（50x50，顶部5像素）")
     return button
 end
 
--- 检测是否为移动设备，自动创建按钮
+-- 仅手机端创建按钮
 if UserInputService.TouchEnabled then
     createMobileHealButton()
-    print("手机端UI已加载：右上角绿色按钮点击开始/停止治疗")
-else
-    print("电脑端模式：Z键长按开始治疗，松开停止")
 end
 
--- 8. 服务端状态查询（复刻原代码逻辑）
+-- 10. 服务端状态查询（通用）
 local holdRemote = ReplicatedStorage:FindFirstChild("HoldHealFriend") 
 if not holdRemote then
     holdRemote = Instance.new("RemoteFunction")
@@ -186,13 +280,15 @@ if not holdRemote then
     holdRemote.Parent = ReplicatedStorage
 end
 holdRemote.OnClientInvoke = function()
-    return isHealing -- 服务端查询当前是否在治疗状态
+    return isHealing
 end
 
 -- 初始化提示
-print("HealFriend脚本加载完成：")
 if UserInputService.TouchEnabled then
-    print("- 手机端：点击右上角按钮切换治疗/停止")
+    print("=== HealFriend脚本加载完成 ===")
+    print("- 手机端：点击右上角按钮→自动治疗最近玩家")
+    print("- 按钮尺寸：50x50 | 位置：顶部5像素")
 else
-    print("- 电脑端：按住Z键治疗，松开停止")
+    print("=== HealFriend脚本加载完成 ===")
+    print("- 电脑端：按住Z键→治疗鼠标指向的玩家，松开停止")
 end
