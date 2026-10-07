@@ -1,0 +1,2149 @@
+local Players           = game:GetService("Players")
+local UserInputService  = game:GetService("UserInputService")
+local RunService        = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+if _G.STBB_StopPrevious then
+    pcall(_G.STBB_StopPrevious)
+    task.wait(0.3)
+end
+
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local TARGET_POSITION   = Vector3.new(558.6, -468.0, 469.4)
+local CCTV_POSITION     = Vector3.new(-834.4, 837.8, -3058.8)
+local FINAL_POSITION    = Vector3.new(-837.2, 837.3, -3056.7)
+local GMAN_POSITION     = Vector3.new(-852.2, 925.9, -3072.3)
+local BOSS5_SAFE_POSITION = Vector3.new(-852.2, 1145, -3072.3)
+local CCTV_LOOK_DIR     = Vector3.new(-1, 0, 0)
+
+local KICK_ON_OTHER_PLAYERS = false
+
+local REQUIRED_MODE     = "ZombieV2"
+local BOSS1_NAME        = "Zombie Upgraded Titan Speaker V2"
+local BOSS2_NAME        = "Mutated Zombie Scientist Toilet"
+local BOSS3_NAME        = "Z UTTV"
+local BOSS4_NAME        = "Siren Titan Raid Boss"
+local BOSS5_NAME        = "Z UTTV Tentacle"
+local SPECIAL_TITAN_NAME = "SpecialTitan-Request [ Zombie Mode ]"
+local GMAN_SCRIPT_NAME  = "GManTurboScript"
+
+local SKILL_RESET_DELAY       = 5
+local LOW_HEALTH_RESET_DELAY  = 5
+local GMAN_SCRIPT_TIMEOUT     = 120
+local SKILL_GRACE_AFTER_FIRE  = 2.5
+local MAX_TRANSFORM_ATTEMPTS  = 5
+local BOSS5_SKILL_INTERVAL    = 15
+local CHARGE_SKILL_INTERVAL   = 0.1
+
+local gmanDistance = 125
+local BOSS5_SKILL_REQUIRE_BOSS = true
+
+local ERROR_KNOWLEDGE = {
+    MODE_NOT_LOADED = { title="Mode 尚未加载", reason="Workspace.Mode 未找到。", solution="等待加载。", action="【终止】。" },
+    MODE_MISMATCH = { title="模式校验失败", reason="不是 ZombieV2。", solution="回到大厅投票ZombieV2。", action="【终止】。" },
+    CHARACTER_NOT_LOADED = { title="角色未加载", reason="Character 未生成。", solution="等待加载。", action="【跳过】。" },
+    LIVING_NOT_FOUND = { title="Living 未找到", reason="无 Living。", solution="等待加载。", action="【终止】。" },
+    PLAYER_FOLDER_NOT_FOUND = { title="玩家文件夹未找到", reason="Living 下无文件夹。", solution="重置角色。", action="【终止】。" },
+    CCTV_SCRIPT_NOT_FOUND = { title="山本技能 脚本未出现", reason="30s 内未检测到。", solution="确认装备的角色。", action="【终止】。" },
+    GMAN_SCRIPT_NOT_FOUND = { title="GManTurboScript 未出现", reason="互动后长期未检测到。", solution="确认已互动成功。", action="【跳过】。" },
+    TELEPORT_FAILED = { title="传送失败", reason="无法设置 CFrame。", solution="等待加载。", action="【跳过】。" },
+    RESPAWN_TIMEOUT = { title="重生超时", reason="Reset 后未重生。", solution="手动重置。", action="【终止】。" },
+    GMAN_DIED = { title="人形18 死亡", reason="角色死亡无法恢复。", solution="重新开始。", action="【终止】。" },
+    RESET_BLOCKED_GMAN = { title="禁止 reset", reason="波13后禁用 reset。", solution="无需处理。", action="【已阻止】。" },
+    PROMPT_NOT_FOUND = { title="未找到互动点", reason="找不到 ProximityPrompt。", solution="检查 SpecialTitan。", action="【继续监听 GManTurboScript】。" },
+    TRANSFORM_FAILED = { title="变身失败", reason="无法变身为人形X18", solution="检查 场上是否存在变身器", action="【终止整个流程】不再进入战斗循环。" },
+    UNKNOWN = { title="未知错误", reason="未预期错误。", solution="重启脚本。", action="【根据类型】。" },
+}
+
+local ModeValue, CurrentMode = nil, nil
+task.spawn(function()
+    local mode = workspace:WaitForChild("Mode", 30)
+    if mode then
+        ModeValue = mode
+        CurrentMode = mode.Value
+        mode:GetPropertyChangedSignal("Value"):Connect(function()
+            CurrentMode = mode.Value
+        end)
+    end
+end)
+
+local scriptRunning    = false
+local battleActive     = false
+local cctvWatchActive  = false
+local cctvTriggered    = false
+local resetInProgress  = false
+local userClosed       = false
+local specialTitanConn = nil
+local specialTitanSeen = false
+local gmanWatchActive  = false
+local gmanBattleActive = false
+local gmanPhaseActive  = false
+local boss5PhaseActive = false
+local boss5SeenOnce    = false
+local boss5LockConn    = nil
+local displayBossName  = nil
+
+local MAX_LOGS = 80
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "CombatUI_" .. tostring(math.random(1, 1e9))
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.IgnoreGuiInset = true
+screenGui.DisplayOrder = 2147483647
+
+local parentTarget = playerGui
+pcall(function()
+    if gethui and type(gethui) == "function" then parentTarget = gethui() end
+end)
+screenGui.Parent = parentTarget
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if screenGui then
+            if not screenGui.Parent and not userClosed then
+                pcall(function() screenGui.Parent = parentTarget end)
+            end
+            if not screenGui.Enabled and not userClosed then
+                screenGui.Enabled = true
+            end
+        end
+    end
+end)
+
+local function makeDraggable(frame, handle)
+    local dragging, dragStart, startPos, dragInput
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; dragStart = input.Position; startPos = frame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    handle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local d = input.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
+                                       startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+end
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 290, 0, 494)
+mainFrame.Position = UDim2.new(0.5, -145, 0.5, -247)
+mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+mainFrame.BackgroundTransparency = 0.15
+mainFrame.BorderSizePixel = 0
+mainFrame.Active = true
+mainFrame.Parent = screenGui
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 10); mainCorner.Parent = mainFrame
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = Color3.fromRGB(80, 120, 200); mainStroke.Thickness = 1.5
+mainStroke.Transparency = 0.3; mainStroke.Parent = mainFrame
+
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 30)
+titleBar.BackgroundColor3 = Color3.fromRGB(50, 80, 140)
+titleBar.BackgroundTransparency = 0.2
+titleBar.BorderSizePixel = 0; titleBar.Parent = mainFrame
+
+local titleCorner = Instance.new("UICorner")
+titleCorner.CornerRadius = UDim.new(0, 10); titleCorner.Parent = titleBar
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -40, 1, 0); titleLabel.Position = UDim2.new(0, 10, 0, 0)
+titleLabel.BackgroundTransparency = 1; titleLabel.Text = "ST:BB刷钱工具（中文）A1.1.2"
+titleLabel.TextColor3 = Color3.fromRGB(220, 230, 255); titleLabel.TextSize = 14
+titleLabel.Font = Enum.Font.GothamBold; titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Parent = titleBar
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 24, 0, 24); closeBtn.Position = UDim2.new(1, -28, 0, 3)
+closeBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60); closeBtn.BackgroundTransparency = 0.3
+closeBtn.Text = "✕"; closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeBtn.TextSize = 13; closeBtn.Font = Enum.Font.GothamBold; closeBtn.BorderSizePixel = 0
+closeBtn.Parent = titleBar
+
+local closeCorner = Instance.new("UICorner")
+closeCorner.CornerRadius = UDim.new(0, 6); closeCorner.Parent = closeBtn
+
+closeBtn.MouseButton1Click:Connect(function()
+    userClosed = true; screenGui.Enabled = false
+end)
+
+makeDraggable(mainFrame, titleBar)
+
+local aiNoticeFrame = Instance.new("Frame")
+aiNoticeFrame.Name = "AINotice"
+aiNoticeFrame.Size = UDim2.new(0, 340, 0, 200)
+aiNoticeFrame.Position = UDim2.new(0.5, -170, 0.5, -100)
+aiNoticeFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+aiNoticeFrame.BackgroundTransparency = 0.1
+aiNoticeFrame.BorderSizePixel = 0
+aiNoticeFrame.Active = true
+aiNoticeFrame.ZIndex = 500
+aiNoticeFrame.Parent = screenGui
+
+local aiNoticeCorner = Instance.new("UICorner")
+aiNoticeCorner.CornerRadius = UDim.new(0, 10)
+aiNoticeCorner.Parent = aiNoticeFrame
+
+local aiNoticeStroke = Instance.new("UIStroke")
+aiNoticeStroke.Color = Color3.fromRGB(240, 180, 60)
+aiNoticeStroke.Thickness = 2
+aiNoticeStroke.Transparency = 0.1
+aiNoticeStroke.Parent = aiNoticeFrame
+
+local aiNoticeTitleBar = Instance.new("Frame")
+aiNoticeTitleBar.Size = UDim2.new(1, 0, 0, 30)
+aiNoticeTitleBar.BackgroundColor3 = Color3.fromRGB(180, 130, 40)
+aiNoticeTitleBar.BackgroundTransparency = 0.15
+aiNoticeTitleBar.BorderSizePixel = 0
+aiNoticeTitleBar.ZIndex = 501
+aiNoticeTitleBar.Parent = aiNoticeFrame
+
+local aiNoticeTitleCorner = Instance.new("UICorner")
+aiNoticeTitleCorner.CornerRadius = UDim.new(0, 10)
+aiNoticeTitleCorner.Parent = aiNoticeTitleBar
+
+local aiNoticeTitleLabel = Instance.new("TextLabel")
+aiNoticeTitleLabel.Size = UDim2.new(1, -20, 1, 0)
+aiNoticeTitleLabel.Position = UDim2.new(0, 10, 0, 0)
+aiNoticeTitleLabel.BackgroundTransparency = 1
+aiNoticeTitleLabel.Text = "⚠️ 使用提示"
+aiNoticeTitleLabel.TextColor3 = Color3.fromRGB(255, 250, 220)
+aiNoticeTitleLabel.TextSize = 14
+aiNoticeTitleLabel.Font = Enum.Font.GothamBold
+aiNoticeTitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+aiNoticeTitleLabel.ZIndex = 502
+aiNoticeTitleLabel.Parent = aiNoticeTitleBar
+
+local aiNoticeText = Instance.new("TextLabel")
+aiNoticeText.Size = UDim2.new(1, -24, 1, -100)
+aiNoticeText.Position = UDim2.new(0, 12, 0, 40)
+aiNoticeText.BackgroundTransparency = 1
+aiNoticeText.Text = "本脚本由 AI 制作，仅供学习与交流使用。\n\n使用本脚本产生的任何后果由使用者自行承担，作者不承担任何责任。\n\n点击下方按钮继续。"
+aiNoticeText.TextColor3 = Color3.fromRGB(240, 240, 250)
+aiNoticeText.TextSize = 13
+aiNoticeText.Font = Enum.Font.Gotham
+aiNoticeText.TextWrapped = true
+aiNoticeText.TextXAlignment = Enum.TextXAlignment.Left
+aiNoticeText.TextYAlignment = Enum.TextYAlignment.Top
+aiNoticeText.ZIndex = 501
+aiNoticeText.Parent = aiNoticeFrame
+
+local aiNoticeBtn = Instance.new("TextButton")
+aiNoticeBtn.Size = UDim2.new(1, -60, 0, 34)
+aiNoticeBtn.Position = UDim2.new(0, 30, 1, -46)
+aiNoticeBtn.BackgroundColor3 = Color3.fromRGB(60, 130, 90)
+aiNoticeBtn.BackgroundTransparency = 0.15
+aiNoticeBtn.Text = "✅ 确定"
+aiNoticeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+aiNoticeBtn.TextSize = 15
+aiNoticeBtn.Font = Enum.Font.GothamBold
+aiNoticeBtn.BorderSizePixel = 0
+aiNoticeBtn.ZIndex = 501
+aiNoticeBtn.Parent = aiNoticeFrame
+
+local aiNoticeBtnCorner = Instance.new("UICorner")
+aiNoticeBtnCorner.CornerRadius = UDim.new(0, 8)
+aiNoticeBtnCorner.Parent = aiNoticeBtn
+
+makeDraggable(aiNoticeFrame, aiNoticeTitleBar)
+
+aiNoticeBtn.MouseButton1Click:Connect(function()
+    aiNoticeFrame:Destroy()
+end)
+
+local infoFrame = Instance.new("Frame")
+infoFrame.Size = UDim2.new(1, -20, 0, 24); infoFrame.Position = UDim2.new(0, 10, 0, 34)
+infoFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 30); infoFrame.BackgroundTransparency = 0.4
+infoFrame.BorderSizePixel = 0; infoFrame.Parent = mainFrame
+
+local infoCorner = Instance.new("UICorner")
+infoCorner.CornerRadius = UDim.new(0, 6); infoCorner.Parent = infoFrame
+
+local modeLabel = Instance.new("TextLabel")
+modeLabel.Size = UDim2.new(0.6, -8, 1, 0); modeLabel.Position = UDim2.new(0, 8, 0, 0)
+modeLabel.BackgroundTransparency = 1; modeLabel.Text = "Mode: 读取中..."
+modeLabel.TextColor3 = Color3.fromRGB(255, 200, 100); modeLabel.TextSize = 13
+modeLabel.Font = Enum.Font.GothamMedium; modeLabel.TextXAlignment = Enum.TextXAlignment.Left
+modeLabel.Parent = infoFrame
+
+local playerCountLabel = Instance.new("TextLabel")
+playerCountLabel.Size = UDim2.new(0.4, -8, 1, 0); playerCountLabel.Position = UDim2.new(0.6, 0, 0, 0)
+playerCountLabel.BackgroundTransparency = 1; playerCountLabel.Text = "玩家: -"
+playerCountLabel.TextColor3 = Color3.fromRGB(180, 220, 255); playerCountLabel.TextSize = 13
+playerCountLabel.Font = Enum.Font.GothamMedium; playerCountLabel.TextXAlignment = Enum.TextXAlignment.Right
+playerCountLabel.Parent = infoFrame
+
+local distanceFrame = Instance.new("Frame")
+distanceFrame.Size = UDim2.new(1, -20, 0, 22); distanceFrame.Position = UDim2.new(0, 10, 0, 62)
+distanceFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 30); distanceFrame.BackgroundTransparency = 0.4
+distanceFrame.BorderSizePixel = 0; distanceFrame.Parent = mainFrame
+
+local distanceCorner = Instance.new("UICorner")
+distanceCorner.CornerRadius = UDim.new(0, 6); distanceCorner.Parent = distanceFrame
+
+local distanceLabel = Instance.new("TextLabel")
+distanceLabel.Size = UDim2.new(0.7, -8, 1, 0); distanceLabel.Position = UDim2.new(0, 8, 0, 0)
+distanceLabel.BackgroundTransparency = 1
+distanceLabel.Text = "传送差距"
+distanceLabel.TextColor3 = Color3.fromRGB(180, 220, 255); distanceLabel.TextSize = 12
+distanceLabel.Font = Enum.Font.Gotham; distanceLabel.TextXAlignment = Enum.TextXAlignment.Left
+distanceLabel.Parent = distanceFrame
+
+local distanceBox = Instance.new("TextBox")
+distanceBox.Size = UDim2.new(0.3, -8, 1, -4); distanceBox.Position = UDim2.new(0.7, 0, 0, 2)
+distanceBox.BackgroundColor3 = Color3.fromRGB(40, 40, 55); distanceBox.BorderSizePixel = 0
+distanceBox.Text = tostring(gmanDistance); distanceBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+distanceBox.TextSize = 12; distanceBox.Font = Enum.Font.Code; distanceBox.ClearTextOnFocus = false
+distanceBox.Parent = distanceFrame
+
+local distanceBoxCorner = Instance.new("UICorner")
+distanceBoxCorner.CornerRadius = UDim.new(0, 4); distanceBoxCorner.Parent = distanceBox
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, -20, 0, 22); statusLabel.Position = UDim2.new(0, 10, 0, 90)
+statusLabel.BackgroundTransparency = 1; statusLabel.Text = ""
+statusLabel.TextColor3 = Color3.fromRGB(180, 220, 255); statusLabel.TextSize = 12
+statusLabel.Font = Enum.Font.Gotham; statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.TextYAlignment = Enum.TextYAlignment.Top; statusLabel.TextWrapped = true
+statusLabel.Parent = mainFrame
+
+local startBtn = Instance.new("TextButton")
+startBtn.Size = UDim2.new(1, -80, 0, 32); startBtn.Position = UDim2.new(0, 10, 0, 116)
+startBtn.BackgroundColor3 = Color3.fromRGB(60, 130, 90); startBtn.BackgroundTransparency = 0.15
+startBtn.Text = "🚀 开始"; startBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+startBtn.TextSize = 15; startBtn.Font = Enum.Font.GothamBold; startBtn.BorderSizePixel = 0
+startBtn.Parent = mainFrame
+
+local btnCorner = Instance.new("UICorner")
+btnCorner.CornerRadius = UDim.new(0, 8); btnCorner.Parent = startBtn
+
+local settingsBtn = Instance.new("TextButton")
+settingsBtn.Size = UDim2.new(0, 60, 0, 32); settingsBtn.Position = UDim2.new(1, -70, 0, 116)
+settingsBtn.BackgroundColor3 = Color3.fromRGB(60, 90, 140); settingsBtn.BackgroundTransparency = 0.15
+settingsBtn.Text = "⚙️ 设置"; settingsBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+settingsBtn.TextSize = 13; settingsBtn.Font = Enum.Font.GothamBold; settingsBtn.BorderSizePixel = 0
+settingsBtn.Parent = mainFrame
+
+local settingsBtnCorner = Instance.new("UICorner")
+settingsBtnCorner.CornerRadius = UDim.new(0, 8); settingsBtnCorner.Parent = settingsBtn
+
+local bossHealthFrame = Instance.new("Frame")
+bossHealthFrame.Size = UDim2.new(1, -20, 0, 44)
+bossHealthFrame.Position = UDim2.new(0, 10, 0, 152)
+bossHealthFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+bossHealthFrame.BackgroundTransparency = 0.4
+bossHealthFrame.BorderSizePixel = 0
+bossHealthFrame.Parent = mainFrame
+
+local bossHealthCorner = Instance.new("UICorner")
+bossHealthCorner.CornerRadius = UDim.new(0, 6)
+bossHealthCorner.Parent = bossHealthFrame
+
+local bossNameLabel = Instance.new("TextLabel")
+bossNameLabel.Size = UDim2.new(1, -16, 0, 18)
+bossNameLabel.Position = UDim2.new(0, 8, 0, 2)
+bossNameLabel.BackgroundTransparency = 1
+bossNameLabel.Text = "当前 Boss：无"
+bossNameLabel.TextColor3 = Color3.fromRGB(255, 220, 220)
+bossNameLabel.TextSize = 12
+bossNameLabel.Font = Enum.Font.GothamBold
+bossNameLabel.TextXAlignment = Enum.TextXAlignment.Left
+bossNameLabel.Parent = bossHealthFrame
+
+local healthBarBg = Instance.new("Frame")
+healthBarBg.Size = UDim2.new(1, -16, 0, 16)
+healthBarBg.Position = UDim2.new(0, 8, 0, 22)
+healthBarBg.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+healthBarBg.BorderSizePixel = 0
+healthBarBg.Parent = bossHealthFrame
+
+local healthBarBgCorner = Instance.new("UICorner")
+healthBarBgCorner.CornerRadius = UDim.new(0, 4)
+healthBarBgCorner.Parent = healthBarBg
+
+local healthBarFill = Instance.new("Frame")
+healthBarFill.Size = UDim2.new(0, 0, 1, 0)
+healthBarFill.Position = UDim2.new(0, 0, 0, 0)
+healthBarFill.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
+healthBarFill.BorderSizePixel = 0
+healthBarFill.Parent = healthBarBg
+
+local healthBarFillCorner = Instance.new("UICorner")
+healthBarFillCorner.CornerRadius = UDim.new(0, 4)
+healthBarFillCorner.Parent = healthBarFill
+
+local healthPercentLabel = Instance.new("TextLabel")
+healthPercentLabel.Size = UDim2.new(1, 0, 1, 0)
+healthPercentLabel.Position = UDim2.new(0, 0, 0, 0)
+healthPercentLabel.BackgroundTransparency = 1
+healthPercentLabel.Text = "--"
+healthPercentLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+healthPercentLabel.TextSize = 11
+healthPercentLabel.Font = Enum.Font.GothamBold
+healthPercentLabel.TextStrokeTransparency = 0.5
+healthPercentLabel.ZIndex = 2
+healthPercentLabel.Parent = healthBarBg
+
+local logHeader = Instance.new("Frame")
+logHeader.Size = UDim2.new(1, -20, 0, 20)
+logHeader.Position = UDim2.new(0, 10, 0, 200)
+logHeader.BackgroundTransparency = 1; logHeader.Parent = mainFrame
+
+local logHeaderLabel = Instance.new("TextLabel")
+logHeaderLabel.Size = UDim2.new(0.6, 0, 1, 0); logHeaderLabel.BackgroundTransparency = 1
+logHeaderLabel.Text = "📋 运行日志"; logHeaderLabel.TextColor3 = Color3.fromRGB(210, 225, 255)
+logHeaderLabel.TextSize = 13; logHeaderLabel.Font = Enum.Font.GothamBold
+logHeaderLabel.TextXAlignment = Enum.TextXAlignment.Left; logHeaderLabel.Parent = logHeader
+
+local clearLogBtn = Instance.new("TextButton")
+clearLogBtn.Size = UDim2.new(0, 42, 0, 18); clearLogBtn.Position = UDim2.new(1, -42, 0, 1)
+clearLogBtn.BackgroundColor3 = Color3.fromRGB(120, 90, 40); clearLogBtn.BackgroundTransparency = 0.2
+clearLogBtn.Text = "清空"; clearLogBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+clearLogBtn.TextSize = 11; clearLogBtn.Font = Enum.Font.GothamBold
+clearLogBtn.BorderSizePixel = 0; clearLogBtn.Parent = logHeader
+
+local clearLogCorner = Instance.new("UICorner")
+clearLogCorner.CornerRadius = UDim.new(0, 4); clearLogCorner.Parent = clearLogBtn
+
+local logScroll = Instance.new("ScrollingFrame")
+logScroll.Size = UDim2.new(1, -20, 0, 210)
+logScroll.Position = UDim2.new(0, 10, 0, 224)
+logScroll.BackgroundColor3 = Color3.fromRGB(20, 20, 26); logScroll.BackgroundTransparency = 0.3
+logScroll.BorderSizePixel = 0; logScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+logScroll.ScrollBarThickness = 5; logScroll.ScrollBarImageColor3 = Color3.fromRGB(90, 120, 180)
+logScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y; logScroll.Parent = mainFrame
+
+local logScrollCorner = Instance.new("UICorner")
+logScrollCorner.CornerRadius = UDim.new(0, 6); logScrollCorner.Parent = logScroll
+
+local logLayout = Instance.new("UIListLayout")
+logLayout.Padding = UDim.new(0, 3); logLayout.SortOrder = Enum.SortOrder.LayoutOrder
+logLayout.Parent = logScroll
+
+local logPadding = Instance.new("UIPadding")
+logPadding.PaddingLeft = UDim.new(0, 4); logPadding.PaddingRight = UDim.new(0, 4)
+logPadding.PaddingTop = UDim.new(0, 4); logPadding.PaddingBottom = UDim.new(0, 4)
+logPadding.Parent = logScroll
+
+local connectionLabel = Instance.new("TextLabel")
+connectionLabel.Size = UDim2.new(1, -20, 0, 18)
+connectionLabel.Position = UDim2.new(0, 10, 0, 440)
+connectionLabel.BackgroundTransparency = 1
+connectionLabel.Text = "🟢 已连接roblox.exe"
+connectionLabel.TextColor3 = Color3.fromRGB(120, 255, 150)
+connectionLabel.TextSize = 12
+connectionLabel.Font = Enum.Font.GothamBold
+connectionLabel.TextXAlignment = Enum.TextXAlignment.Left
+connectionLabel.Parent = mainFrame
+
+local logLimitFrame = Instance.new("Frame")
+logLimitFrame.Size = UDim2.new(1, -20, 0, 22)
+logLimitFrame.Position = UDim2.new(0, 10, 0, 462)
+logLimitFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+logLimitFrame.BackgroundTransparency = 0.4
+logLimitFrame.BorderSizePixel = 0
+logLimitFrame.Parent = mainFrame
+
+local logLimitCorner = Instance.new("UICorner")
+logLimitCorner.CornerRadius = UDim.new(0, 6); logLimitCorner.Parent = logLimitFrame
+
+local logLimitLabel = Instance.new("TextLabel")
+logLimitLabel.Size = UDim2.new(0.6, -8, 1, 0); logLimitLabel.Position = UDim2.new(0, 8, 0, 0)
+logLimitLabel.BackgroundTransparency = 1
+logLimitLabel.Text = "日志存储上限:"
+logLimitLabel.TextColor3 = Color3.fromRGB(180, 220, 255); logLimitLabel.TextSize = 12
+logLimitLabel.Font = Enum.Font.Gotham; logLimitLabel.TextXAlignment = Enum.TextXAlignment.Left
+logLimitLabel.Parent = logLimitFrame
+
+local logLimitBox = Instance.new("TextBox")
+logLimitBox.Size = UDim2.new(0.4, -8, 1, -4); logLimitBox.Position = UDim2.new(0.6, 0, 0, 2)
+logLimitBox.BackgroundColor3 = Color3.fromRGB(40, 40, 55); logLimitBox.BorderSizePixel = 0
+logLimitBox.Text = tostring(MAX_LOGS); logLimitBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+logLimitBox.TextSize = 12; logLimitBox.Font = Enum.Font.Code; logLimitBox.ClearTextOnFocus = false
+logLimitBox.Parent = logLimitFrame
+
+local logLimitBoxCorner = Instance.new("UICorner")
+logLimitBoxCorner.CornerRadius = UDim.new(0, 4); logLimitBoxCorner.Parent = logLimitBox
+
+local logEntries = {}
+local logOrderCounter = 0
+
+local LEVEL_COLORS = {
+    INFO  = Color3.fromRGB(180, 210, 255),
+    OK    = Color3.fromRGB(120, 255, 150),
+    WARN  = Color3.fromRGB(255, 210, 100),
+    ERROR = Color3.fromRGB(255, 120, 120),
+}
+
+local function trimOldLogs()
+    while #logEntries > MAX_LOGS do
+        local oldest = table.remove(logEntries, 1)
+        if oldest and oldest.frame then oldest.frame:Destroy() end
+    end
+end
+
+local showErrorDetail
+
+local function addLog(level, message, errorKey)
+    logOrderCounter = logOrderCounter + 1
+    local entryFrame = Instance.new("Frame")
+    entryFrame.Size = UDim2.new(1, -8, 0, 0)
+    entryFrame.AutomaticSize = Enum.AutomaticSize.Y
+    entryFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    entryFrame.BackgroundTransparency = (level == "ERROR") and 0.1 or 0.5
+    entryFrame.BorderSizePixel = 0; entryFrame.LayoutOrder = logOrderCounter
+    entryFrame.Parent = logScroll
+
+    local entryCorner = Instance.new("UICorner")
+    entryCorner.CornerRadius = UDim.new(0, 5); entryCorner.Parent = entryFrame
+
+    local entryPadding = Instance.new("UIPadding")
+    entryPadding.PaddingLeft = UDim.new(0, 6); entryPadding.PaddingRight = UDim.new(0, 6)
+    entryPadding.PaddingTop = UDim.new(0, 3); entryPadding.PaddingBottom = UDim.new(0, 3)
+    entryPadding.Parent = entryFrame
+
+    local hasErrorBtn = (level == "ERROR" and errorKey and ERROR_KNOWLEDGE[errorKey])
+    local rightSpace = hasErrorBtn and 46 or 0
+
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Size = UDim2.new(1, -rightSpace, 0, 0)
+    textLabel.AutomaticSize = Enum.AutomaticSize.Y
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = string.format("[%s] %s", level, message)
+    textLabel.TextColor3 = LEVEL_COLORS[level] or Color3.new(1, 1, 1)
+    textLabel.TextSize = 11; textLabel.Font = Enum.Font.Code
+    textLabel.TextXAlignment = Enum.TextXAlignment.Left
+    textLabel.TextYAlignment = Enum.TextYAlignment.Top
+    textLabel.TextWrapped = true; textLabel.Parent = entryFrame
+
+    if hasErrorBtn then
+        local errBtn = Instance.new("TextButton")
+        errBtn.Size = UDim2.new(0, 40, 0, 18); errBtn.Position = UDim2.new(1, -40, 0, 0)
+        errBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60); errBtn.BackgroundTransparency = 0.15
+        errBtn.Text = "详情"; errBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        errBtn.TextSize = 11; errBtn.Font = Enum.Font.GothamBold
+        errBtn.BorderSizePixel = 0; errBtn.Parent = entryFrame
+
+        local errCorner = Instance.new("UICorner")
+        errCorner.CornerRadius = UDim.new(0, 4); errCorner.Parent = errBtn
+
+        errBtn.MouseButton1Click:Connect(function() showErrorDetail(errorKey) end)
+    end
+
+    table.insert(logEntries, { frame = entryFrame, level = level, key = errorKey })
+    trimOldLogs()
+
+    task.defer(function()
+        if logScroll and logScroll.Parent then
+            logScroll.CanvasPosition = Vector2.new(0, logScroll.AbsoluteCanvasSize.Y)
+        end
+    end)
+end
+
+local settingsWindow = Instance.new("Frame")
+settingsWindow.Name = "SettingsWindow"
+settingsWindow.Size = UDim2.new(0, 280, 0, 90)
+settingsWindow.Position = UDim2.new(0.5, -140, 0.5, -45)
+settingsWindow.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+settingsWindow.BackgroundTransparency = 0.1
+settingsWindow.BorderSizePixel = 0
+settingsWindow.Active = true
+settingsWindow.Visible = false
+settingsWindow.ZIndex = 300
+settingsWindow.Parent = screenGui
+
+local settingsWindowCorner = Instance.new("UICorner")
+settingsWindowCorner.CornerRadius = UDim.new(0, 10)
+settingsWindowCorner.Parent = settingsWindow
+
+local settingsWindowStroke = Instance.new("UIStroke")
+settingsWindowStroke.Color = Color3.fromRGB(80, 120, 200)
+settingsWindowStroke.Thickness = 1.5
+settingsWindowStroke.Transparency = 0.2
+settingsWindowStroke.Parent = settingsWindow
+
+local settingsTitleBar = Instance.new("Frame")
+settingsTitleBar.Size = UDim2.new(1, 0, 0, 30)
+settingsTitleBar.BackgroundColor3 = Color3.fromRGB(50, 80, 140)
+settingsTitleBar.BackgroundTransparency = 0.15
+settingsTitleBar.BorderSizePixel = 0
+settingsTitleBar.ZIndex = 301
+settingsTitleBar.Parent = settingsWindow
+
+local settingsTitleCorner = Instance.new("UICorner")
+settingsTitleCorner.CornerRadius = UDim.new(0, 10)
+settingsTitleCorner.Parent = settingsTitleBar
+
+local settingsTitleLabel = Instance.new("TextLabel")
+settingsTitleLabel.Size = UDim2.new(1, -40, 1, 0)
+settingsTitleLabel.Position = UDim2.new(0, 10, 0, 0)
+settingsTitleLabel.BackgroundTransparency = 1
+settingsTitleLabel.Text = "自动化设置"
+settingsTitleLabel.TextColor3 = Color3.fromRGB(220, 230, 255)
+settingsTitleLabel.TextSize = 14
+settingsTitleLabel.Font = Enum.Font.GothamBold
+settingsTitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+settingsTitleLabel.ZIndex = 302
+settingsTitleLabel.Parent = settingsTitleBar
+
+local settingsCloseBtn = Instance.new("TextButton")
+settingsCloseBtn.Size = UDim2.new(0, 24, 0, 24)
+settingsCloseBtn.Position = UDim2.new(1, -28, 0, 3)
+settingsCloseBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+settingsCloseBtn.BackgroundTransparency = 0.3
+settingsCloseBtn.Text = "✕"
+settingsCloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+settingsCloseBtn.TextSize = 13
+settingsCloseBtn.Font = Enum.Font.GothamBold
+settingsCloseBtn.BorderSizePixel = 0
+settingsCloseBtn.ZIndex = 302
+settingsCloseBtn.Parent = settingsTitleBar
+
+local settingsCloseCorner = Instance.new("UICorner")
+settingsCloseCorner.CornerRadius = UDim.new(0, 6)
+settingsCloseCorner.Parent = settingsCloseBtn
+
+settingsCloseBtn.MouseButton1Click:Connect(function()
+    settingsWindow.Visible = false
+end)
+
+makeDraggable(settingsWindow, settingsTitleBar)
+
+local kickFrame = Instance.new("Frame")
+kickFrame.Size = UDim2.new(1, -20, 0, 40)
+kickFrame.Position = UDim2.new(0, 10, 0, 36)
+kickFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+kickFrame.BackgroundTransparency = 0.4
+kickFrame.BorderSizePixel = 0
+kickFrame.ZIndex = 301
+kickFrame.Parent = settingsWindow
+
+local kickCorner = Instance.new("UICorner")
+kickCorner.CornerRadius = UDim.new(0, 6)
+kickCorner.Parent = kickFrame
+
+local kickLabel = Instance.new("TextLabel")
+kickLabel.Size = UDim2.new(0.7, -8, 1, 0)
+kickLabel.Position = UDim2.new(0, 8, 0, 0)
+kickLabel.BackgroundTransparency = 1
+kickLabel.Text = "有其他玩家时踢出自己:"
+kickLabel.TextColor3 = Color3.fromRGB(180, 220, 255)
+kickLabel.TextSize = 12
+kickLabel.Font = Enum.Font.Gotham
+kickLabel.TextXAlignment = Enum.TextXAlignment.Left
+kickLabel.ZIndex = 302
+kickLabel.Parent = kickFrame
+
+local kickBtn = Instance.new("TextButton")
+kickBtn.Size = UDim2.new(0, 50, 0, 22)
+kickBtn.Position = UDim2.new(1, -58, 0, 9)
+kickBtn.Text = KICK_ON_OTHER_PLAYERS and "开" or "关"
+kickBtn.BackgroundColor3 = KICK_ON_OTHER_PLAYERS
+    and Color3.fromRGB(60, 130, 90)
+    or Color3.fromRGB(120, 60, 60)
+kickBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+kickBtn.TextSize = 13
+kickBtn.Font = Enum.Font.GothamBold
+kickBtn.BorderSizePixel = 0
+kickBtn.ZIndex = 302
+kickBtn.Parent = kickFrame
+
+local kickBtnCorner = Instance.new("UICorner")
+kickBtnCorner.CornerRadius = UDim.new(0, 6)
+kickBtnCorner.Parent = kickBtn
+
+kickBtn.MouseButton1Click:Connect(function()
+    KICK_ON_OTHER_PLAYERS = not KICK_ON_OTHER_PLAYERS
+    if KICK_ON_OTHER_PLAYERS then
+        kickBtn.Text = "开"
+        kickBtn.BackgroundColor3 = Color3.fromRGB(60, 130, 90)
+        addLog("INFO", "有其他玩家时踢出自己：已开启")
+    else
+        kickBtn.Text = "关"
+        kickBtn.BackgroundColor3 = Color3.fromRGB(120, 60, 60)
+        addLog("INFO", "有其他玩家时踢出自己：已关闭")
+    end
+end)
+
+settingsBtn.MouseButton1Click:Connect(function()
+    settingsWindow.Visible = not settingsWindow.Visible
+end)
+
+clearLogBtn.MouseButton1Click:Connect(function()
+    for _, e in ipairs(logEntries) do if e.frame then e.frame:Destroy() end end
+    logEntries = {}
+    addLog("INFO", "日志已清空")
+end)
+
+logLimitBox.FocusLost:Connect(function()
+    local n = tonumber(logLimitBox.Text)
+    if n and n > 0 and n <= 100000 then
+        MAX_LOGS = math.floor(n)
+        logLimitBox.Text = tostring(MAX_LOGS)
+        trimOldLogs()
+        addLog("OK", string.format("日志存储上限已更新：%d", MAX_LOGS))
+    else
+        logLimitBox.Text = tostring(MAX_LOGS)
+        addLog("WARN", "无效的日志上限值（请输入 1 - 100000）")
+    end
+end)
+
+local detailGui = nil
+local function closeErrorDetail()
+    if detailGui then detailGui:Destroy() detailGui = nil end
+end
+
+showErrorDetail = function(errorKey)
+    closeErrorDetail()
+    local info = ERROR_KNOWLEDGE[errorKey] or ERROR_KNOWLEDGE.UNKNOWN
+
+    local detailFrame = Instance.new("Frame")
+    detailFrame.Size = UDim2.new(0, 380, 0, 270)
+    detailFrame.Position = UDim2.new(0.5, -190, 0.5, -135)
+    detailFrame.BackgroundColor3 = Color3.fromRGB(35, 25, 25)
+    detailFrame.BackgroundTransparency = 0.05
+    detailFrame.BorderSizePixel = 0; detailFrame.Active = true
+    detailFrame.ZIndex = 200; detailFrame.Parent = screenGui
+    detailGui = detailFrame
+
+    local dCorner = Instance.new("UICorner")
+    dCorner.CornerRadius = UDim.new(0, 10); dCorner.Parent = detailFrame
+
+    local dStroke = Instance.new("UIStroke")
+    dStroke.Color = Color3.fromRGB(200, 80, 80); dStroke.Thickness = 1.5
+    dStroke.Transparency = 0.2; dStroke.Parent = detailFrame
+
+    local dTitleBar = Instance.new("Frame")
+    dTitleBar.Size = UDim2.new(1, 0, 0, 30)
+    dTitleBar.BackgroundColor3 = Color3.fromRGB(140, 50, 50)
+    dTitleBar.BackgroundTransparency = 0.15; dTitleBar.BorderSizePixel = 0
+    dTitleBar.ZIndex = 201; dTitleBar.Parent = detailFrame
+
+    local dTitleCorner = Instance.new("UICorner")
+    dTitleCorner.CornerRadius = UDim.new(0, 10); dTitleCorner.Parent = dTitleBar
+
+    local dTitleLabel = Instance.new("TextLabel")
+    dTitleLabel.Size = UDim2.new(1, -40, 1, 0); dTitleLabel.Position = UDim2.new(0, 10, 0, 0)
+    dTitleLabel.BackgroundTransparency = 1; dTitleLabel.Text = "⚠️ 错误详情"
+    dTitleLabel.TextColor3 = Color3.fromRGB(255, 230, 230); dTitleLabel.TextSize = 14
+    dTitleLabel.Font = Enum.Font.GothamBold; dTitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    dTitleLabel.ZIndex = 202; dTitleLabel.Parent = dTitleBar
+
+    local dCloseBtn = Instance.new("TextButton")
+    dCloseBtn.Size = UDim2.new(0, 24, 0, 24); dCloseBtn.Position = UDim2.new(1, -28, 0, 3)
+    dCloseBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60); dCloseBtn.BackgroundTransparency = 0.2
+    dCloseBtn.Text = "✕"; dCloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    dCloseBtn.TextSize = 13; dCloseBtn.Font = Enum.Font.GothamBold
+    dCloseBtn.BorderSizePixel = 0; dCloseBtn.ZIndex = 202; dCloseBtn.Parent = dTitleBar
+
+    local dCloseCorner = Instance.new("UICorner")
+    dCloseCorner.CornerRadius = UDim.new(0, 6); dCloseCorner.Parent = dCloseBtn
+
+    dCloseBtn.MouseButton1Click:Connect(closeErrorDetail)
+
+    local contentFrame = Instance.new("Frame")
+    contentFrame.Size = UDim2.new(1, -20, 1, -40); contentFrame.Position = UDim2.new(0, 10, 0, 34)
+    contentFrame.BackgroundTransparency = 1; contentFrame.ZIndex = 201
+    contentFrame.Parent = detailFrame
+
+    local titleText = Instance.new("TextLabel")
+    titleText.Size = UDim2.new(1, 0, 0, 20); titleText.BackgroundTransparency = 1
+    titleText.Text = "【问题】" .. info.title
+    titleText.TextColor3 = Color3.fromRGB(255, 180, 180); titleText.TextSize = 13
+    titleText.Font = Enum.Font.GothamBold; titleText.TextXAlignment = Enum.TextXAlignment.Left
+    titleText.ZIndex = 202; titleText.Parent = contentFrame
+
+    local reasonText = Instance.new("TextLabel")
+    reasonText.Size = UDim2.new(1, 0, 0, 44); reasonText.Position = UDim2.new(0, 0, 0, 22)
+    reasonText.BackgroundTransparency = 1; reasonText.Text = "【原因】" .. info.reason
+    reasonText.TextColor3 = Color3.fromRGB(255, 220, 220); reasonText.TextSize = 12
+    reasonText.Font = Enum.Font.Gotham; reasonText.TextXAlignment = Enum.TextXAlignment.Left
+    reasonText.TextYAlignment = Enum.TextYAlignment.Top; reasonText.TextWrapped = true
+    reasonText.ZIndex = 202; reasonText.Parent = contentFrame
+
+    local actionText = Instance.new("TextLabel")
+    actionText.Size = UDim2.new(1, 0, 0, 44); actionText.Position = UDim2.new(0, 0, 0, 68)
+    actionText.BackgroundTransparency = 1
+    actionText.Text = "【脚本做了什么】" .. (info.action or "—")
+    actionText.TextColor3 = Color3.fromRGB(255, 200, 130); actionText.TextSize = 12
+    actionText.Font = Enum.Font.Gotham; actionText.TextXAlignment = Enum.TextXAlignment.Left
+    actionText.TextYAlignment = Enum.TextYAlignment.Top; actionText.TextWrapped = true
+    actionText.ZIndex = 202; actionText.Parent = contentFrame
+
+    local solutionText = Instance.new("TextLabel")
+    solutionText.Size = UDim2.new(1, 0, 1, -114); solutionText.Position = UDim2.new(0, 0, 0, 114)
+    solutionText.BackgroundTransparency = 1; solutionText.Text = "【解决办法】" .. info.solution
+    solutionText.TextColor3 = Color3.fromRGB(180, 255, 200); solutionText.TextSize = 12
+    solutionText.Font = Enum.Font.Gotham; solutionText.TextXAlignment = Enum.TextXAlignment.Left
+    solutionText.TextYAlignment = Enum.TextYAlignment.Top; solutionText.TextWrapped = true
+    solutionText.ZIndex = 202; solutionText.Parent = contentFrame
+
+    makeDraggable(detailFrame, dTitleBar)
+end
+
+local function setStatus(text, color)
+    statusLabel.Text = text or ""
+    statusLabel.TextColor3 = color or Color3.fromRGB(180, 220, 255)
+end
+
+local function getMyHumanoid()
+    local char = player.Character
+    if not char then return nil end
+    return char:FindFirstChildOfClass("Humanoid")
+end
+
+local function getRootPart()
+    local char = player.Character
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart")
+end
+
+local function updateButtonState(state)
+    if state == "idle" then
+        startBtn.Text = "🚀 开始"
+        startBtn.BackgroundColor3 = Color3.fromRGB(60, 130, 90)
+    elseif state == "running" then
+        startBtn.Text = "⏹️ 终止运行"
+        startBtn.BackgroundColor3 = Color3.fromRGB(180, 60, 60)
+    end
+end
+
+local function safeValue(v)
+    if type(v) ~= "number" then return 0 end
+    if v ~= v then return 0 end
+    if v == math.huge then return 999999 end
+    if v == -math.huge then return -999999 end
+    return v
+end
+
+local function safeFormatNumber(n, fmt)
+    if type(n) ~= "number" then return "?" end
+    if n ~= n then return "NaN" end
+    if n == math.huge then return "INF" end
+    if n == -math.huge then return "-INF" end
+    return string.format(fmt, n)
+end
+
+local function teleportToPosition(position, lookDir)
+    local char = player.Character
+    if not char then return false, "角色未加载" end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false, "未找到 HumanoidRootPart" end
+
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if humanoid and humanoid.SeatPart then
+        humanoid.Sit = false
+        task.wait(0.1)
+    end
+
+    if lookDir then
+        local flat = Vector3.new(lookDir.X, 0, lookDir.Z)
+        if flat.Magnitude > 0 then
+            flat = flat.Unit
+            hrp.CFrame = CFrame.lookAt(position, position + flat)
+        else
+            hrp.CFrame = CFrame.new(position)
+        end
+    else
+        hrp.CFrame = CFrame.new(position)
+    end
+
+    hrp.Velocity = Vector3.zero
+    hrp.RotVelocity = Vector3.zero
+    return true
+end
+
+local function triggerYSkill()
+    local char = player.Character
+    if not char then return false end
+    local cd = char:FindFirstChild("CooldownFolder")
+    if not cd then return false end
+    local mfCd = cd:FindFirstChild("4ThMatchFlame_Cooldown")
+    if mfCd and mfCd.Value == true then return false end
+    local am1 = cd:FindFirstChild("ActiveM1")
+    if am1 and am1.Value == true then return false end
+    local remote = ReplicatedStorage:FindFirstChild("HeadCaptainOfCCTVSet")
+    if remote then
+        remote:FireServer({ Skill = "4ThMatchFlame" })
+        return true
+    end
+    return false
+end
+
+local G_TOILET_REMOTE = "G-ToiletTurboSkillsSet"
+
+local function gmanCanFire(skillName)
+    local char = player.Character
+    if not char then return false end
+    local hum = char:FindFirstChild("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+    local cd = char:FindFirstChild("CooldownFolder")
+    if not cd then return false end
+    local cdVal = cd:FindFirstChild(skillName .. "_Cooldown")
+    if cdVal and cdVal.Value == true then return false end
+    local am1 = cd:FindFirstChild("ActiveM1")
+    if am1 and am1.Value == true then return false end
+    return true
+end
+
+local function gmanFire(skillName)
+    if not gmanCanFire(skillName) then return false end
+    local remote = ReplicatedStorage:FindFirstChild(G_TOILET_REMOTE)
+    if not remote then return false end
+    remote:FireServer({ Skill = skillName })
+    return true
+end
+
+local function gmanLMB()
+    local char = player.Character
+    if not char then return false end
+    local hum = char:FindFirstChild("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+    local cd = char:FindFirstChild("CooldownFolder")
+    if not cd then return false end
+
+    local lmbActive = cd:FindFirstChild("LMBActive")
+    if lmbActive and lmbActive.Value == true then return false end
+
+    local am1 = cd:FindFirstChild("ActiveM1")
+    if am1 and am1.Value == true then return false end
+
+    local remote = ReplicatedStorage:FindFirstChild("LMB")
+    if remote then
+        remote:FireServer()
+        return true
+    end
+    return false
+end
+
+local function getGManMode()
+    local char = player.Character
+    local vf = char and char:FindFirstChild("ValuesFolder")
+    local mode = vf and vf:FindFirstChild("Mode")
+    return mode and mode.Value or "Fist"
+end
+
+local function getCharge()
+    local char = player.Character
+    local vf = char and char:FindFirstChild("ValuesFolder")
+    local c = vf and vf:FindFirstChild("Charge")
+    return c and safeValue(c.Value) or 0
+end
+
+local function getChargeBar()
+    local char = player.Character
+    local vf = char and char:FindFirstChild("ValuesFolder")
+    local cb = vf and vf:FindFirstChild("ChargeBar")
+    return cb and safeValue(cb.Value) or 0
+end
+
+local function isGManTurboTransformed()
+    local char = player.Character
+    if not char then return false end
+
+    local vf = char:FindFirstChild("ValuesFolder")
+    if vf and (vf:FindFirstChild("Charge") or vf:FindFirstChild("ChargeBar")) then
+        return true
+    end
+
+    local cd = char:FindFirstChild("CooldownFolder")
+    if cd and (cd:FindFirstChild("Charge_Cooldown")
+        or cd:FindFirstChild("IAmAtomic_Cooldown")) then
+        return true
+    end
+
+    return false
+end
+
+local function getTSkill()
+    local m = getGManMode()
+    if m == "Fist" then return "Clap" end
+    if m == "Sword" then return "GiantSlash" end
+end
+
+local function getESkill()
+    local m = getGManMode()
+    if m == "Fist" then return "HardPunch" end
+    if m == "Sword" then return "SliceSlash" end
+end
+
+local function getRSkill()
+    local m = getGManMode()
+    if m == "Fist" then return "PunchSlam" end
+    if m == "Sword" then return "Stab" end
+end
+
+local function doReset()
+    local char = player.Character
+    if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid:ChangeState(Enum.HumanoidStateType.Dead)
+    else
+        char:BreakJoints()
+    end
+end
+
+local function getBossByName(name)
+    local living = workspace:FindFirstChild("Living")
+    if not living then return nil end
+    return living:FindFirstChild(name)
+end
+
+local function isBossAlive(name)
+    local boss = getBossByName(name)
+    if not boss then return false end
+    local hum = boss:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    return hum.Health > 0
+end
+
+local function getBossCenter(name)
+    local boss = getBossByName(name)
+    if not boss then return nil end
+    local hrp = boss:FindFirstChild("HumanoidRootPart")
+    if hrp then return hrp.Position end
+    if boss.PrimaryPart then return boss.PrimaryPart.Position end
+    local ok, pivot = pcall(function() return boss:GetPivot() end)
+    if ok and pivot then return pivot.Position end
+    return nil
+end
+
+local function waitForRespawnAndScript()
+    if not scriptRunning then return false end
+    local oldChar = player.Character
+    local t1 = tick() + 30
+    while player.Character == oldChar and tick() < t1 and scriptRunning do
+        task.wait(0.1)
+    end
+    if not scriptRunning then return false end
+
+    if not player.Character or player.Character == oldChar then
+        local ok = pcall(function() player.CharacterAdded:Wait() end)
+        if not ok then
+            addLog("ERROR", "等待新角色超时", "RESPAWN_TIMEOUT")
+            return false
+        end
+    end
+
+    local t2 = tick() + 20
+    while tick() < t2 and scriptRunning do
+        local c = player.Character
+        if c and c:FindFirstChild("CooldownFolder") and c:FindFirstChild("ValuesFolder") then
+            break
+        end
+        task.wait(0.1)
+    end
+
+    local living = workspace:FindFirstChild("Living")
+    if living and scriptRunning then
+        local folder = living:FindFirstChild(player.Name)
+        if not folder then
+            folder = living:WaitForChild(player.Name, 30)
+        end
+        if folder and not folder:FindFirstChild("HeadCaptainOfCCTVScript") then
+            folder:WaitForChild("HeadCaptainOfCCTVScript", 30)
+        end
+    end
+
+    task.wait(0.5)
+    return scriptRunning
+end
+
+local function safeResetAndRespawn()
+    if gmanPhaseActive then
+        addLog("WARN", "GManTurbo 阶段禁止 reset，已阻止", "RESET_BLOCKED_GMAN")
+        return false
+    end
+    if resetInProgress then return false end
+    resetInProgress = true
+    doReset()
+    local ok = waitForRespawnAndScript()
+    resetInProgress = false
+    return ok
+end
+
+local function getObjectPosition(obj)
+    if not obj then return nil end
+    if obj:IsA("BasePart") then return obj.Position end
+    if obj:IsA("Attachment") then return obj.WorldPosition end
+    if obj:IsA("Model") then
+        local hrp = obj:FindFirstChild("HumanoidRootPart")
+        if hrp then return hrp.Position end
+        if obj.PrimaryPart then return obj.PrimaryPart.Position end
+        local ok, cf = pcall(function() return obj:GetBoundingBox() end)
+        if ok and cf then return cf.Position end
+        local ok2, pivot = pcall(function() return obj:GetPivot() end)
+        if ok2 and pivot then return pivot.Position end
+    end
+    return nil
+end
+
+local function findPromptForTitan(titan)
+    if not titan then return nil, nil end
+    for _, d in ipairs(titan:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and d.Enabled then
+            local part = d.Parent
+            if part and part:IsA("BasePart") then
+                return d, part
+            end
+        end
+    end
+
+    local titanPos = getObjectPosition(titan)
+    if not titanPos then return nil, nil end
+
+    local nearest, nearestPart, minDist = nil, nil, 500
+    for _, p in ipairs(workspace:GetDescendants()) do
+        if p:IsA("ProximityPrompt") and p.Enabled then
+            local part = p.Parent
+            if part and part:IsA("BasePart") then
+                local dist = (part.Position - titanPos).Magnitude
+                if dist < minDist then
+                    minDist = dist
+                    nearest = p
+                    nearestPart = part
+                end
+            end
+        end
+    end
+    return nearest, nearestPart
+end
+
+local function handleSpecialTitan()
+    if not scriptRunning then return end
+    if specialTitanSeen then return end
+    specialTitanSeen = true
+
+    addLog("OK", "检测到 " .. SPECIAL_TITAN_NAME)
+    setStatus("检测到 SpecialTitan，等 1s 后确认位置...",
+        Color3.fromRGB(120, 255, 150))
+
+    task.spawn(function()
+        local titan = workspace:FindFirstChild(SPECIAL_TITAN_NAME)
+        local pos1 = getObjectPosition(titan)
+        if pos1 then
+            addLog("INFO", string.format("SpecialTitan 初始位置：%.1f, %.1f, %.1f",
+                pos1.X, pos1.Y, pos1.Z))
+        end
+
+        task.wait(1)
+        if not scriptRunning then return end
+
+        local titan2 = workspace:FindFirstChild(SPECIAL_TITAN_NAME)
+        if not titan2 then
+            addLog("WARN", "SpecialTitan 消失，仍尝试监听 GManTurboScript")
+            startGManScriptWatch()
+            return
+        end
+
+        local pos2 = getObjectPosition(titan2)
+        if pos2 then
+            addLog("INFO", string.format("SpecialTitan 最新位置：%.1f, %.1f, %.1f",
+                pos2.X, pos2.Y, pos2.Z))
+        end
+
+        local prompt, promptPart = findPromptForTitan(titan2)
+        if not prompt then
+            addLog("ERROR", "未找到 SpecialTitan 的 ProximityPrompt",
+                "PROMPT_NOT_FOUND")
+            startGManScriptWatch()
+            return
+        end
+
+        addLog("INFO", string.format("找到 ProximityPrompt，距离 titan 约 %.1f studs",
+            (promptPart.Position - pos2).Magnitude))
+
+        local targetPos = promptPart.Position + Vector3.new(0, 3, 0)
+        local ok, err = teleportToPosition(targetPos, nil)
+        if not ok then
+            addLog("ERROR", "传送到互动点失败：" .. tostring(err), "TELEPORT_FAILED")
+            startGManScriptWatch()
+            return
+        end
+        addLog("OK", "已传送到互动点附近")
+
+        task.wait(0.8)
+        if not scriptRunning then return end
+
+        if fireproximityprompt then
+            local fired = pcall(fireproximityprompt, prompt)
+            if fired then
+                addLog("OK", "已触发 ProximityPrompt 互动")
+            else
+                addLog("WARN", "fireproximityprompt 调用失败")
+            end
+        else
+            addLog("WARN", "无 fireproximityprompt，靠位置自动触发")
+        end
+
+        setStatus("互动已尝试，持续监听 GManTurboScript...",
+            Color3.fromRGB(120, 255, 150))
+
+        task.wait(0.5)
+        startGManScriptWatch()
+    end)
+end
+
+local function startSpecialTitanWatch()
+    if specialTitanConn then specialTitanConn:Disconnect() end
+    specialTitanSeen = false
+
+    if workspace:FindFirstChild(SPECIAL_TITAN_NAME) then
+        task.spawn(handleSpecialTitan)
+    end
+    specialTitanConn = workspace.ChildAdded:Connect(function(child)
+        if child.Name == SPECIAL_TITAN_NAME and scriptRunning then
+            task.spawn(handleSpecialTitan)
+        end
+    end)
+end
+
+local function attemptTransform()
+    for attempt = 1, MAX_TRANSFORM_ATTEMPTS do
+        if not scriptRunning then return false end
+
+        addLog("INFO", string.format("变身尝试 %d/%d", attempt, MAX_TRANSFORM_ATTEMPTS))
+        setStatus(string.format("变身尝试 %d/%d...", attempt, MAX_TRANSFORM_ATTEMPTS),
+            Color3.fromRGB(255, 200, 100))
+
+        teleportToPosition(GMAN_POSITION, nil)
+        task.wait(0.4)
+
+        if gmanFire("ChangeMode") then
+            addLog("OK", string.format("已触发 Q 技能（第 %d 次）", attempt))
+        else
+            addLog("WARN", string.format("Q 技能触发失败（第 %d 次，可能冷却中）", attempt))
+        end
+
+        local waitEnd = tick() + 3
+        while tick() < waitEnd do
+            task.wait(0.25)
+            if isGManTurboTransformed() then
+                addLog("OK", "变身成功！")
+                setStatus("✅ 变身成功", Color3.fromRGB(120, 255, 150))
+                return true
+            end
+        end
+
+        addLog("WARN", string.format("第 %d 次变身未检测到成功", attempt))
+    end
+
+    return false
+end
+
+local function onGManScriptReady()
+    if not scriptRunning then return end
+
+    gmanPhaseActive = true
+    addLog("WARN", "波13变身后：已启用 reset 保护")
+
+    addLog("OK", "检测到 GManTurboScript，准备变身")
+    setStatus("GManTurbo 单位已就绪，尝试变身...",
+        Color3.fromRGB(120, 255, 150))
+
+    task.spawn(function()
+        task.wait(0.5)
+        local ok = attemptTransform()
+        if not ok then
+            addLog("ERROR",
+                string.format("变身 %d 次均失败，任务终止", MAX_TRANSFORM_ATTEMPTS),
+                "TRANSFORM_FAILED")
+            setStatus("❌ 变身失败，任务终止", Color3.fromRGB(255, 80, 80))
+            scriptRunning = false
+            updateButtonState("idle")
+            return
+        end
+
+        task.wait(0.5)
+        startGManBattle()
+    end)
+end
+
+function startGManScriptWatch()
+    if gmanWatchActive then return end
+    gmanWatchActive = true
+
+    task.spawn(function()
+        addLog("INFO", "开始轮询 GManTurboScript（每 0.5s，最长 " .. GMAN_SCRIPT_TIMEOUT .. "s）")
+        setStatus("监听 GManTurboScript 中...", Color3.fromRGB(180, 220, 255))
+
+        local startTime = tick()
+        while scriptRunning
+            and (tick() - startTime) < GMAN_SCRIPT_TIMEOUT do
+
+            local living = workspace:FindFirstChild("Living")
+            local folder = living and living:FindFirstChild(player.Name)
+            local gmanScript = folder and folder:FindFirstChild(GMAN_SCRIPT_NAME)
+
+            if gmanScript then
+                addLog("OK", "GManTurboScript 已出现（Living." .. player.Name .. "." .. GMAN_SCRIPT_NAME .. "）")
+                onGManScriptReady()
+                return
+            end
+
+            task.wait(0.5)
+        end
+
+        if scriptRunning then
+            addLog("ERROR", "GManTurboScript " .. GMAN_SCRIPT_TIMEOUT .. "秒内未出现",
+                "GMAN_SCRIPT_NOT_FOUND")
+            setStatus("⚠️ GManTurboScript 未出现", Color3.fromRGB(255, 150, 150))
+        end
+    end)
+end
+
+local function tryFireGManSkill()
+    local tSkill = getTSkill()
+    if tSkill and gmanFire(tSkill) then
+        return true, "T (" .. tSkill .. ")"
+    end
+    local eSkill = getESkill()
+    if eSkill and gmanFire(eSkill) then
+        return true, "E (" .. eSkill .. ")"
+    end
+    local rSkill = getRSkill()
+    if rSkill and gmanFire(rSkill) then
+        return true, "R (" .. rSkill .. ")"
+    end
+    return false, nil
+end
+
+local function teleportBehindBoss(boss)
+    if not boss then return end
+    local bossRoot = boss:FindFirstChild("HumanoidRootPart") or boss.PrimaryPart
+    if not bossRoot then return end
+
+    local bossPos = bossRoot.Position
+    local bossLook = bossRoot.CFrame.LookVector
+    local behind = bossPos - bossLook * gmanDistance
+
+    local myHrp = getRootPart()
+    if myHrp then
+        myHrp.CFrame = CFrame.lookAt(
+            behind,
+            Vector3.new(bossPos.X, behind.Y, bossPos.Z)
+        )
+        myHrp.Velocity = Vector3.zero
+        myHrp.RotVelocity = Vector3.zero
+    end
+end
+
+local function startBoss5PositionLock()
+    if boss5LockConn then return end
+    boss5LockConn = RunService.RenderStepped:Connect(function()
+        if not boss5PhaseActive or not scriptRunning then return end
+        local char = player.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        hrp.CFrame = CFrame.new(BOSS5_SAFE_POSITION)
+        hrp.Velocity = Vector3.zero
+        hrp.RotVelocity = Vector3.zero
+    end)
+end
+
+local function stopBoss5PositionLock()
+    if boss5LockConn then
+        boss5LockConn:Disconnect()
+        boss5LockConn = nil
+    end
+end
+
+local function endScript(reason)
+    scriptRunning = false
+    battleActive = false
+    gmanBattleActive = false
+    gmanWatchActive = false
+    boss5PhaseActive = false
+    cctvWatchActive = false
+    cctvTriggered = false
+    resetInProgress = false
+    displayBossName = nil
+
+    stopBoss5PositionLock()
+
+    if specialTitanConn then
+        specialTitanConn:Disconnect()
+        specialTitanConn = nil
+    end
+
+    updateButtonState("idle")
+
+    if reason then
+        addLog("OK", reason)
+    end
+
+    addLog("INFO", "任务结束，脚本停止。")
+end
+
+function startGManBattle()
+    if gmanBattleActive then return end
+    gmanBattleActive = true
+
+    addLog("INFO", "GManTurbo 战斗循环启动")
+    setStatus("等待 Z UTTV...", Color3.fromRGB(255, 220, 120))
+
+    displayBossName = BOSS3_NAME
+
+    task.spawn(function()
+        local currentBossName = BOSS3_NAME
+        local skillGraceUntil = 0
+        local boss5LastB = 0
+
+        while gmanBattleActive and scriptRunning do
+            local myHum = getMyHumanoid()
+            if not myHum then
+                setStatus("⚠️ 角色丢失，等待恢复...", Color3.fromRGB(255, 150, 150))
+                task.wait(0.3)
+                continue
+            end
+
+            if myHum.Health <= 0 then
+                addLog("ERROR", "GManTurbo 阶段角色死亡", "GMAN_DIED")
+                setStatus("❌ GManTurbo 死亡，任务失败", Color3.fromRGB(255, 80, 80))
+                endScript("GManTurbo 死亡，脚本停止")
+                return
+            end
+
+            if boss5PhaseActive then
+                local living = workspace:FindFirstChild("Living")
+                if not living then
+                    task.wait(0.5)
+                    continue
+                end
+
+                local boss5 = living:FindFirstChild(BOSS5_NAME)
+                local boss5Hum = boss5 and boss5:FindFirstChildOfClass("Humanoid")
+
+                if boss5 or boss5Hum then
+                    if not boss5SeenOnce then
+                        boss5SeenOnce = true
+                        addLog("OK", "Boss5 本体已出现，开始攻击")
+                    end
+                end
+
+                local boss5ModelGone = (boss5SeenOnce and not boss5)
+                local boss5HealthZero = (boss5 and boss5Hum and boss5Hum.Health <= 0)
+
+                if boss5ModelGone or boss5HealthZero then
+                    if boss5ModelGone then
+                        addLog("OK", BOSS5_NAME .. " 模型已消失，判定为已死亡")
+                    else
+                        addLog("OK", BOSS5_NAME .. " 血量已归零，判定为已死亡")
+                    end
+                    setStatus("🎉 Z UTTV Tentacle 已击败，脚本结束",
+                        Color3.fromRGB(120, 255, 150))
+                    endScript(BOSS5_NAME .. " 已被击败，全部任务完成，脚本停止运行")
+                    return
+                end
+
+                if BOSS5_SKILL_REQUIRE_BOSS then
+                    if not boss5 or not boss5Hum then
+                        setStatus("⏳ Boss5：等待 Z UTTV Tentacle 本体出现（配置要求）...",
+                            Color3.fromRGB(255, 220, 120))
+                        task.wait(0.3)
+                        continue
+                    end
+                end
+
+                local lmbOK = gmanLMB()
+
+                local now = tick()
+
+                local elapsed
+                if boss5LastB == 0 then
+                    elapsed = BOSS5_SKILL_INTERVAL
+                else
+                    elapsed = now - boss5LastB
+                end
+
+                if elapsed >= BOSS5_SKILL_INTERVAL then
+                    if gmanFire("IAmAtomic") then
+                        addLog("OK", "Boss5 阶段：已触发 B 技能（IAmAtomic）")
+                        setStatus(string.format(
+                            "⚔️ Boss5：B 技能已触发 · %s",
+                            lmbOK and "普攻中" or "普攻待命"),
+                            Color3.fromRGB(120, 255, 150))
+                    else
+                        addLog("WARN", "Boss5 阶段：B 技能触发失败（冷却中？）")
+                        setStatus(string.format(
+                            "⏳ Boss5：B 技能冷却中 · %s",
+                            lmbOK and "普攻中" or "普攻待命"),
+                            Color3.fromRGB(255, 220, 120))
+                    end
+                    boss5LastB = now
+                else
+                    setStatus(string.format(
+                        "🛡️ Boss5：安全区 (Y=1145)，下次 B 技能 %.1fs · %s",
+                        BOSS5_SKILL_INTERVAL - elapsed,
+                        lmbOK and "普攻中" or "普攻待命"),
+                        Color3.fromRGB(180, 255, 180))
+                end
+
+                task.wait(0.15)
+                continue
+            end
+
+            local living = workspace:FindFirstChild("Living")
+            if not living then
+                task.wait(0.5)
+                continue
+            end
+
+            if currentBossName == BOSS3_NAME then
+                local siren = living:FindFirstChild(BOSS4_NAME)
+                local sirenHum = siren and siren:FindFirstChildOfClass("Humanoid")
+
+                if siren and sirenHum and sirenHum.Health > 0 then
+                    addLog("OK", "检测到 " .. BOSS4_NAME .. "，切换到安全位置等待 Z UTTV 死亡")
+                    setStatus("🛡️ Siren 出现，安全位置等待 Z UTTV 死亡...",
+                        Color3.fromRGB(255, 200, 100))
+                    teleportToPosition(GMAN_POSITION, nil)
+
+                    local waitStart = tick()
+                    local switched = false
+                    while gmanBattleActive and scriptRunning do
+                        local zuttv = living:FindFirstChild(BOSS3_NAME)
+                        local zuttvHum = zuttv and zuttv:FindFirstChildOfClass("Humanoid")
+
+                        if not zuttvHum or zuttvHum.Health <= 0 then
+                            addLog("OK", "Z UTTV 已死亡，切换目标为 " .. BOSS4_NAME)
+                            setStatus("⚔️ 目标切换为 Siren Titan（追着打）",
+                                Color3.fromRGB(120, 255, 150))
+                            currentBossName = BOSS4_NAME
+                            displayBossName = BOSS4_NAME
+                            skillGraceUntil = 0
+                            switched = true
+                            break
+                        end
+
+                        local now = tick()
+                        if now - waitStart > 1 then
+                            teleportToPosition(GMAN_POSITION, nil)
+                            waitStart = now
+                        end
+                        task.wait(0.3)
+                    end
+
+                    if switched then continue end
+                end
+            end
+
+            local boss = living:FindFirstChild(currentBossName)
+            local bossHum = boss and boss:FindFirstChildOfClass("Humanoid")
+
+            if boss and bossHum and bossHum.Health <= 0 then
+                if currentBossName == BOSS4_NAME then
+                    addLog("OK", BOSS4_NAME .. " 已被击败，进入 Boss5 阶段（Z UTTV Tentacle）")
+                    setStatus("✅ Siren 已击败，进入 Boss5 阶段",
+                        Color3.fromRGB(120, 255, 150))
+                    boss5PhaseActive = true
+                    boss5SeenOnce = false
+                    displayBossName = BOSS5_NAME
+                    boss5LastB = 0
+                    skillGraceUntil = 0
+                    startBoss5PositionLock()
+                    teleportToPosition(BOSS5_SAFE_POSITION, nil)
+                    task.wait(0.5)
+                    continue
+                else
+                    addLog("WARN", "Z UTTV 已死亡，等待 Siren 出现...")
+                    setStatus("⏳ 等待 Siren 出现...",
+                        Color3.fromRGB(255, 220, 120))
+                    task.wait(0.5)
+                    continue
+                end
+            end
+
+            if not boss or not bossHum then
+                setStatus("⏳ 等待 " .. currentBossName .. " 出现...",
+                    Color3.fromRGB(255, 220, 120))
+                task.wait(0.3)
+                continue
+            end
+
+            if currentBossName == BOSS4_NAME then
+                teleportBehindBoss(boss)
+            end
+
+            local now = tick()
+            if now < skillGraceUntil then
+                teleportBehindBoss(boss)
+                local remain = skillGraceUntil - now
+                setStatus(string.format("🎬 技能后摇中 (%.1fs)，跟随 boss...", remain),
+                    Color3.fromRGB(255, 220, 100))
+                task.wait(0.08)
+                continue
+            end
+
+            local charge = getCharge()
+            local chargeBar = getChargeBar()
+
+            if charge >= 3 then
+                teleportBehindBoss(boss)
+                local fired, used = tryFireGManSkill()
+
+                if fired then
+                    addLog("OK", string.format("释放 %s（Charge=%s）", used, tostring(charge)))
+                    setStatus("⚔️ 已释放 " .. used .. "，等待前摇...",
+                        Color3.fromRGB(120, 255, 150))
+                    skillGraceUntil = tick() + SKILL_GRACE_AFTER_FIRE
+                else
+                    setStatus("⏳ T/E/R 均冷却中...", Color3.fromRGB(255, 220, 120))
+                    task.wait(0.2)
+                end
+            elseif chargeBar >= 3 then
+                if gmanFire("Charge") then
+                    addLog("INFO", string.format(
+                        "累积 Charge（Charge=%s, ChargeBar=%s）",
+                        tostring(charge), safeFormatNumber(chargeBar, "%.2f")))
+                    setStatus(string.format(
+                        "⚡ 累积 Charge (%s/3)，ChargeBar=%s",
+                        tostring(charge), safeFormatNumber(chargeBar, "%.2f")),
+                        Color3.fromRGB(180, 255, 180))
+                end
+                task.wait(CHARGE_SKILL_INTERVAL)
+            else
+                if currentBossName == BOSS4_NAME then
+                    teleportBehindBoss(boss)
+                    if gmanLMB() then
+                        setStatus("⚔️ Boss4：跟随 Boss，触发 LMB 普通攻击",
+                            Color3.fromRGB(120, 255, 150))
+                    else
+                        setStatus("⚔️ Boss4：跟随 Boss（LMB 冷却中）",
+                            Color3.fromRGB(255, 220, 120))
+                    end
+                    task.wait(0.12)
+                else
+                    teleportToPosition(GMAN_POSITION, nil)
+                    setStatus(string.format(
+                        "🛡️ 安全位置等待能量 (ChargeBar=%s)",
+                        safeFormatNumber(chargeBar, "%.2f")),
+                        Color3.fromRGB(255, 200, 100))
+                    task.wait(0.4)
+                end
+            end
+        end
+    end)
+end
+
+local currentStage    = "boss1"
+local hasSeenCurrent  = false
+local bossSkillResetAt = 0
+
+local function startBattleLoop()
+    if battleActive then return end
+    battleActive = true
+    currentStage = "boss1"
+    hasSeenCurrent = false
+    bossSkillResetAt = 0
+    displayBossName = BOSS1_NAME
+
+    addLog("INFO", "战斗循环启动（阶段：Boss1）")
+
+    task.spawn(function()
+        setStatus("⚔️ 等待 Boss1（波 5）出现...",
+            Color3.fromRGB(255, 220, 120))
+
+        while battleActive and scriptRunning do
+            local bossName = (currentStage == "boss1") and BOSS1_NAME or BOSS2_NAME
+            local bossAlive = isBossAlive(bossName)
+
+            if bossAlive then
+                if not hasSeenCurrent then
+                    addLog("OK", string.format("%s 已出现",
+                        (currentStage == "boss1") and "Boss1" or "Boss2"))
+                    setStatus(string.format("⚔️ 正在战斗：%s", bossName),
+                        Color3.fromRGB(120, 255, 150))
+                end
+                hasSeenCurrent = true
+            end
+
+            if hasSeenCurrent and not bossAlive then
+                if currentStage == "boss1" then
+                    addLog("OK", "Boss1 被击败，先 reset 恢复血量")
+                    setStatus("✅ Boss1 被击败，重置角色...",
+                        Color3.fromRGB(120, 255, 150))
+
+                    if safeResetAndRespawn() then
+                        teleportToPosition(CCTV_POSITION, CCTV_LOOK_DIR)
+                        addLog("OK", "已传送回 CCTV 位置，等待 Boss2")
+                    end
+
+                    currentStage = "boss2"
+                    hasSeenCurrent = false
+                    bossSkillResetAt = 0
+                    displayBossName = BOSS2_NAME
+                    setStatus("⚔️ 等待 Boss2（波 10）出现...",
+                        Color3.fromRGB(255, 220, 120))
+                    addLog("INFO", "切换到阶段：Boss2")
+                    continue
+                else
+                    addLog("OK", "Boss2 被击败，先 reset 恢复血量")
+                    setStatus("✅ Boss2 被击败，重置角色...",
+                        Color3.fromRGB(120, 255, 150))
+
+                    if safeResetAndRespawn() then
+                        teleportToPosition(FINAL_POSITION, nil)
+                        addLog("OK", "已传送到最终位置")
+                        setStatus("✅ 已传送到最终位置，等待 SpecialTitan",
+                            Color3.fromRGB(120, 255, 150))
+                    end
+
+                    displayBossName = nil
+                    battleActive = false
+                    startSpecialTitanWatch()
+                    return
+                end
+            end
+
+            if not hasSeenCurrent then
+                setStatus(string.format(
+                    "⏳ 等待 %s（%s）出现...",
+                    (currentStage == "boss1") and "Boss1" or "Boss2",
+                    (currentStage == "boss1") and "波 5" or "波 10"),
+                    Color3.fromRGB(255, 220, 120))
+                task.wait(0.5)
+                continue
+            end
+
+            local myHum = getMyHumanoid()
+            local myHealth = myHum and myHum.Health or 0
+
+            if myHealth <= 0 then
+                setStatus("💀 角色已死亡，等待重生...",
+                    Color3.fromRGB(255, 150, 150))
+                addLog("WARN", "角色死亡，等待重生")
+                waitForRespawnAndScript()
+                setStatus("⚔️ 重生完成，继续战斗",
+                    Color3.fromRGB(255, 220, 120))
+                continue
+            end
+
+            if myHealth < 5 then
+                setStatus(string.format("⚠️ 血量低 (%.1f)，5 秒后重置...", myHealth),
+                    Color3.fromRGB(255, 200, 100))
+                addLog("WARN", string.format("血量低 (%.1f)，5 秒后重置", myHealth))
+                task.wait(LOW_HEALTH_RESET_DELAY)
+
+                if not scriptRunning then return end
+                myHum = getMyHumanoid()
+                myHealth = myHum and myHum.Health or 0
+
+                if myHealth > 0 and myHealth < 5 then
+                    setStatus("🔄 执行 reset...", Color3.fromRGB(255, 150, 150))
+                    addLog("INFO", "执行 reset（血量过低）")
+                    if safeResetAndRespawn() then
+                        teleportToPosition(CCTV_POSITION, CCTV_LOOK_DIR)
+                        setStatus("⚔️ 重生完成，继续战斗",
+                            Color3.fromRGB(255, 220, 120))
+                    end
+                end
+                continue
+            end
+
+            local center = getBossCenter(bossName)
+            if center then
+                local hrp = getRootPart()
+                if hrp then
+                    hrp.CFrame = CFrame.new(center)
+                    hrp.Velocity = Vector3.zero
+                    hrp.RotVelocity = Vector3.zero
+                end
+            end
+
+            local fired = triggerYSkill()
+
+            if fired then
+                bossSkillResetAt = tick()
+            end
+
+            if bossSkillResetAt > 0
+                and (tick() - bossSkillResetAt) >= SKILL_RESET_DELAY
+                and not resetInProgress then
+
+                addLog("INFO", string.format(
+                    "技能释放后 %d 秒，触发 reset（阶段：%s）",
+                    SKILL_RESET_DELAY,
+                    (currentStage == "boss1") and "Boss1" or "Boss2"))
+                setStatus("🔄 技能后周期 reset...",
+                    Color3.fromRGB(255, 200, 100))
+                bossSkillResetAt = 0
+
+                if safeResetAndRespawn() then
+                    teleportToPosition(CCTV_POSITION, CCTV_LOOK_DIR)
+                    setStatus("⚔️ 重生完成，继续战斗",
+                        Color3.fromRGB(255, 220, 120))
+                end
+                continue
+            end
+
+            task.wait(0.1)
+        end
+    end)
+end
+
+local function checkMode()
+    if not ModeValue then return false, "Mode 尚未加载", "MODE_NOT_LOADED" end
+    local strVal = tostring(ModeValue.Value)
+    if strVal ~= REQUIRED_MODE then
+        return false, string.format("模式不匹配 (当前: %s)", strVal), "MODE_MISMATCH"
+    end
+    return true
+end
+
+local function fireCCTVTeleport()
+    if cctvTriggered then return end
+    cctvTriggered = true
+
+    addLog("OK", "检测到 HeadCaptainOfCCTVScript")
+    setStatus("CCTV 出现，校验模式...", Color3.fromRGB(180, 220, 255))
+
+    local ok, err, errKey = checkMode()
+    if not ok then
+        addLog("ERROR", tostring(err), errKey)
+        setStatus("❌ " .. tostring(err) .. "，已终止",
+            Color3.fromRGB(255, 120, 120))
+        scriptRunning = false
+        updateButtonState("idle")
+        return
+    end
+
+    addLog("OK", "模式校验通过")
+
+    task.spawn(function()
+        if not scriptRunning then return end
+        local success, err2 = teleportToPosition(CCTV_POSITION, CCTV_LOOK_DIR)
+        if success then
+            setStatus("✅ CCTV 传送完成，进入战斗循环",
+                Color3.fromRGB(120, 255, 150))
+            addLog("OK", "CCTV 传送完成")
+            task.wait(0.3)
+            if scriptRunning then startBattleLoop() end
+        else
+            setStatus("⚠️ CCTV 传送失败: " .. tostring(err2),
+                Color3.fromRGB(255, 150, 150))
+            addLog("ERROR", "CCTV 传送失败：" .. tostring(err2), "TELEPORT_FAILED")
+        end
+    end)
+end
+
+local function startCCTVWatch()
+    if cctvWatchActive then return end
+    cctvWatchActive = true
+    cctvTriggered = false
+
+    setStatus("监听 CCTV 脚本中...", Color3.fromRGB(180, 220, 255))
+    addLog("INFO", "开始监听 HeadCaptainOfCCTVScript")
+
+    task.spawn(function()
+        if not scriptRunning then return end
+        local living = workspace:WaitForChild("Living", 30)
+        if not living or not scriptRunning then
+            if not living then
+                addLog("ERROR", "未找到 Workspace.Living", "LIVING_NOT_FOUND")
+                scriptRunning = false
+                updateButtonState("idle")
+            end
+            cctvWatchActive = false
+            return
+        end
+
+        local folder = living:FindFirstChild(player.Name)
+        if not folder then folder = living:WaitForChild(player.Name, 30) end
+        if not folder then
+            addLog("ERROR", "未找到玩家文件夹", "PLAYER_FOLDER_NOT_FOUND")
+            scriptRunning = false
+            updateButtonState("idle")
+            cctvWatchActive = false
+            return
+        end
+
+        if folder:FindFirstChild("HeadCaptainOfCCTVScript") then
+            fireCCTVTeleport()
+            cctvWatchActive = false
+            return
+        end
+
+        local done = false
+        task.delay(30, function()
+            if not done and not cctvTriggered and scriptRunning then
+                addLog("ERROR", "HeadCaptainOfCCTVScript 30 秒内未出现",
+                    "CCTV_SCRIPT_NOT_FOUND")
+            end
+        end)
+
+        local conn
+        conn = folder.ChildAdded:Connect(function(child)
+            if not scriptRunning then
+                if conn then conn:Disconnect() end
+                return
+            end
+            if child.Name == "HeadCaptainOfCCTVScript" then
+                done = true
+                if conn then conn:Disconnect() end
+                fireCCTVTeleport()
+                cctvWatchActive = false
+            end
+        end)
+    end)
+end
+
+local function doStartTask()
+    if userClosed then return end
+    if screenGui and not screenGui.Parent then return end
+
+    scriptRunning = true
+    battleActive = false
+    cctvWatchActive = false
+    cctvTriggered = false
+    resetInProgress = false
+    gmanWatchActive = false
+    gmanBattleActive = false
+    gmanPhaseActive = false
+    boss5PhaseActive = false
+    boss5SeenOnce = false
+    displayBossName = nil
+
+    if specialTitanConn then
+        pcall(function() specialTitanConn:Disconnect() end)
+        specialTitanConn = nil
+    end
+    stopBoss5PositionLock()
+
+    updateButtonState("running")
+
+    local n = tonumber(distanceBox.Text)
+    if n and n > 0 then gmanDistance = n end
+
+    startSpecialTitanWatch()
+
+    local success, err = teleportToPosition(TARGET_POSITION, nil)
+    if success then
+        addLog("OK", "已传送到目标位置，开始监听 CCTV")
+        startCCTVWatch()
+    else
+        addLog("ERROR", "传送失败：" .. tostring(err), "TELEPORT_FAILED")
+        setStatus("传送失败：" .. tostring(err), Color3.fromRGB(255, 150, 150))
+        scriptRunning = false
+        updateButtonState("idle")
+    end
+end
+
+local lastPlayerCount = #Players:GetPlayers()
+
+local function refreshPlayerCountLabel()
+    local n = #Players:GetPlayers()
+    if n > 1 then
+        playerCountLabel.Text = string.format("玩家: %d ⚠️", n)
+        playerCountLabel.TextColor3 = Color3.fromRGB(255, 180, 100)
+    else
+        playerCountLabel.Text = string.format("玩家: %d", n)
+        playerCountLabel.TextColor3 = Color3.fromRGB(180, 220, 255)
+    end
+end
+
+local function onPlayerCountChanged()
+    local n = #Players:GetPlayers()
+    refreshPlayerCountLabel()
+    if n == lastPlayerCount then return end
+    if n > 1 and lastPlayerCount <= 1 then
+        addLog("WARN", string.format("玩家数：%d（推荐为 1）", n))
+    elseif n <= 1 and lastPlayerCount > 1 then
+        addLog("OK", string.format("玩家数：%d（推荐状态）", n))
+    end
+    lastPlayerCount = n
+end
+
+Players.PlayerAdded:Connect(function() task.defer(onPlayerCountChanged) end)
+Players.PlayerRemoving:Connect(function() task.defer(onPlayerCountChanged) end)
+
+refreshPlayerCountLabel()
+if lastPlayerCount > 1 then
+    addLog("WARN", string.format("玩家数：%d（推荐为 1）", lastPlayerCount))
+end
+
+_G.STBB_StopPrevious = function()
+    scriptRunning = false
+    battleActive = false
+    cctvWatchActive = false
+    cctvTriggered = false
+    resetInProgress = false
+    gmanBattleActive = false
+    gmanWatchActive = false
+    boss5PhaseActive = false
+    displayBossName = nil
+    userClosed = true
+
+    if specialTitanConn then
+        pcall(function() specialTitanConn:Disconnect() end)
+        specialTitanConn = nil
+    end
+    if boss5LockConn then
+        pcall(function() boss5LockConn:Disconnect() end)
+        boss5LockConn = nil
+    end
+    if screenGui then
+        pcall(function() screenGui:Destroy() end)
+    end
+end
+
+local function stopAll()
+    scriptRunning = false
+    battleActive = false
+    cctvWatchActive = false
+    cctvTriggered = false
+    resetInProgress = false
+    bossSkillResetAt = 0
+    gmanBattleActive = false
+    gmanWatchActive = false
+    boss5PhaseActive = false
+    displayBossName = nil
+
+    stopBoss5PositionLock()
+
+    if specialTitanConn then specialTitanConn:Disconnect() specialTitanConn = nil end
+
+    addLog("WARN", "用户手动终止运行")
+    setStatus("已终止", Color3.fromRGB(255, 150, 150))
+    updateButtonState("idle")
+end
+
+startBtn.MouseButton1Click:Connect(function()
+    if scriptRunning then stopAll() return end
+    doStartTask()
+end)
+
+distanceBox.FocusLost:Connect(function()
+    local n = tonumber(distanceBox.Text)
+    if n and n > 0 then
+        gmanDistance = n
+        addLog("INFO", string.format("传送差距已更新：%d", n))
+    else
+        distanceBox.Text = tostring(gmanDistance)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+
+        if not KICK_ON_OTHER_PLAYERS then continue end
+        if userClosed then continue end
+
+        local playerCount = #Players:GetPlayers()
+        if playerCount > 1 then
+            addLog("WARN", string.format(
+                "检测到服务器内有 %d 名玩家，正在终止运行并踢出自己...", playerCount))
+            setStatus("⚠️ 检测到其他玩家，踢出自己", Color3.fromRGB(255, 120, 120))
+
+            scriptRunning = false
+            battleActive = false
+            gmanBattleActive = false
+            gmanWatchActive = false
+            boss5PhaseActive = false
+            cctvWatchActive = false
+            cctvTriggered = false
+            resetInProgress = false
+            displayBossName = nil
+
+            stopBoss5PositionLock()
+
+            if specialTitanConn then
+                pcall(function() specialTitanConn:Disconnect() end)
+                specialTitanConn = nil
+            end
+
+            updateButtonState("idle")
+
+            task.wait(0.2)
+            pcall(function()
+                player:Kick(string.format(
+                    "服务器内检测到其他玩家 (%d 人)，脚本已自动踢出。", playerCount))
+            end)
+
+            task.wait(0.5)
+            pcall(function() game:Shutdown() end)
+
+            break
+        end
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    if ModeValue then
+        modeLabel.Text = "Mode: " .. tostring(ModeValue.Value)
+    else
+        modeLabel.Text = "Mode: 未找到"
+    end
+
+    if displayBossName then
+        local living = workspace:FindFirstChild("Living")
+        local boss = living and living:FindFirstChild(displayBossName)
+
+        if boss then
+            local hum = boss:FindFirstChildOfClass("Humanoid")
+            if hum then
+                bossNameLabel.Text = "当前 Boss：" .. displayBossName
+
+                local maxHp = math.max(hum.MaxHealth, 1)
+                local pct = math.clamp(hum.Health / maxHp, 0, 1)
+
+                healthBarFill.Size = UDim2.new(pct, 0, 1, 0)
+                healthPercentLabel.Text = string.format("%.1f%%  (%.0f / %.0f)",
+                    pct * 100, hum.Health, hum.MaxHealth)
+
+                if pct > 0.5 then
+                    healthBarFill.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
+                elseif pct > 0.2 then
+                    healthBarFill.BackgroundColor3 = Color3.fromRGB(240, 160, 40)
+                else
+                    healthBarFill.BackgroundColor3 = Color3.fromRGB(180, 30, 30)
+                end
+            else
+                bossNameLabel.Text = "当前 Boss：" .. displayBossName .. "（无 Humanoid）"
+                healthBarFill.Size = UDim2.new(0, 0, 1, 0)
+                healthPercentLabel.Text = "--"
+            end
+        else
+            bossNameLabel.Text = "当前 Boss：" .. displayBossName .. "（未出现）"
+            healthBarFill.Size = UDim2.new(0, 0, 1, 0)
+            healthPercentLabel.Text = "等待中..."
+        end
+    else
+        bossNameLabel.Text = "当前 Boss：无"
+        healthBarFill.Size = UDim2.new(0, 0, 1, 0)
+        healthPercentLabel.Text = "--"
+    end
+end)
+
+addLog("INFO", "脚本已加载")
+task.spawn(function()
+    local t = tick() + 30
+    while not ModeValue and tick() < t do task.wait(0.2) end
+    if ModeValue then
+        addLog("OK", "Mode 已加载：" .. tostring(ModeValue.Value))
+    else
+        addLog("ERROR", "Mode 未加载", "MODE_NOT_LOADED")
+    end
+end)
